@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Voice Agent (WS)</title>
+    <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+        .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+        button { padding: 10px 14px; cursor: pointer; }
+        input, select { padding: 10px; min-width: 280px; }
+        .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-top: 14px; }
+        .muted { color: #666; font-size: 12px; }
+        pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 12px; border-radius: 8px; }
+        .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+        @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+    </style>
+</head>
+<body>
+<h2>Voice Agent 前端 (纯静态)</h2>
+
+<div class="card">
+    <div class="row">
+        <label>WS 地址：</label>
+        <input id="wsUrl" />
+        <button id="btnConnect">连接</button>
+        <button id="btnDisconnect" disabled>断开</button>
+    </div>
+    <div class="muted">
+        默认会用当前站点推导：ws(s)://{host}/api/v1/voice/agent
+    </div>
+</div>
+
+<div class="card">
+    <div class="row">
+        <button id="btnStartMic" disabled>开始说话</button>
+        <button id="btnStopMic" disabled>停止说话</button>
+        <button id="btnAudioEnd" disabled>发送 audio_end</button>
+        <label class="muted">输入：16k PCM / 输出：24k PCM</label>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+        <input id="textInput" placeholder="输入文字发送给模型（可选）" />
+        <button id="btnSendText" disabled>发送文本</button>
+    </div>
+</div>
+
+<div class="grid">
+    <div class="card">
+        <div class="row">
+            <strong>转写/事件</strong>
+            <button id="btnClearLog">清空</button>
+        </div>
+        <pre id="log"></pre>
+    </div>
+
+    <div class="card">
+        <strong>播放状态</strong>
+        <pre id="playState"></pre>
+    </div>
+</div>
+
+<script src="./app.js"></script>
+</body>
+</html>
