@@ -1,14 +1,20 @@
 package com.litongjava.study.voice.agent.handler;
 
+
+
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.litongjava.study.voice.agent.bridge.BridgeFrontendSender;
 import com.litongjava.study.voice.agent.bridge.GeminiLiveBridge;
+import com.litongjava.study.voice.agent.model.WsVoiceAgentRequestMessage;
+import com.litongjava.study.voice.agent.model.WsVoiceAgentResponseMessage;
+import com.litongjava.study.voice.agent.model.WsVoiceAgentType;
 import com.litongjava.tio.core.ChannelContext;
 import com.litongjava.tio.core.Tio;
 import com.litongjava.tio.http.common.HttpRequest;
 import com.litongjava.tio.http.common.HttpResponse;
+import com.litongjava.tio.utils.json.JsonUtils;
 import com.litongjava.tio.websocket.common.WebSocketRequest;
 import com.litongjava.tio.websocket.common.WebSocketResponse;
 import com.litongjava.tio.websocket.common.WebSocketSessionContext;
@@ -29,42 +35,16 @@ public class VoiceSocketHandler implements IWebSocketHandler {
   }
 
   @Override
-  public HttpResponse handshake(HttpRequest httpRequest, HttpResponse response, ChannelContext channelContext) throws Exception {
+  public HttpResponse handshake(HttpRequest httpRequest, HttpResponse response, ChannelContext channelContext)
+      throws Exception {
     log.info("请求信息: {}", httpRequest);
     return response;
   }
 
   @Override
-  public void onAfterHandshaked(HttpRequest httpRequest, HttpResponse httpResponse, ChannelContext channelContext) throws Exception {
+  public void onAfterHandshaked(HttpRequest httpRequest, HttpResponse httpResponse, ChannelContext channelContext)
+      throws Exception {
     log.info("握手完成: {}", httpRequest);
-    
-
-    String k = key(channelContext);
-
-    BridgeFrontendSender sender = new BridgeFrontendSender() {
-      @Override
-      public void sendText(String json) {
-        WebSocketResponse wsResp = WebSocketResponse.fromText(json, CHARSET);
-        Tio.send(channelContext, wsResp);
-      }
-
-      @Override
-      public void sendBinary(byte[] bytes) {
-        WebSocketResponse wsResp = WebSocketResponse.fromBytes(bytes);
-        Tio.send(channelContext, wsResp);
-      }
-
-      @Override
-      public void close(String reason) {
-        Tio.remove(channelContext, reason);
-      }
-    };
-
-    GeminiLiveBridge bridge = new GeminiLiveBridge(sender);
-    BRIDGES.put(k, bridge);
-
-    // 连接 Gemini Live（异步）
-    bridge.connect();
   }
 
   @Override
@@ -94,51 +74,123 @@ public class VoiceSocketHandler implements IWebSocketHandler {
     String path = wsSessionContext.getHandshakeRequest().getRequestLine().path;
     log.info("路径：{}，收到消息：{}", path, text);
 
-    GeminiLiveBridge bridge = BRIDGES.get(key(channelContext));
-    if (bridge == null) {
-      Tio.send(channelContext, WebSocketResponse.fromText("{\"type\":\"error\",\"message\":\"no bridge\"}", CHARSET));
+    String t = text == null ? "" : text.trim();
+
+    // 先尝试解析为 JSON -> WsMessage
+    WsVoiceAgentRequestMessage msg = null;
+    try {
+      msg = JsonUtils.parse(t, WsVoiceAgentRequestMessage.class);
+    } catch (Exception je) {
+      // 解析失败：降级为普通文本处理
+      log.debug("收到非 JSON 文本或无法解析为 WsMessage", je.getMessage());
+      return null;
+    } catch (Throwable e) {
+      log.error("解析收到的消息异常", e);
       return null;
     }
+    GeminiLiveBridge bridge = BRIDGES.get(key(channelContext));
 
-    // 用最简单的协议：非 JSON 就当普通文本；JSON 只识别两种
-    String t = text.trim();
-    if (t.startsWith("{") && t.endsWith("}")) {
-      // 你可以换成 Jackson/Fastjson 解析
-      if (t.contains("\"type\":\"audio_end\"")) {
-        bridge.sendAudioStreamEnd();
-      } else if (t.contains("\"type\":\"text\"")) {
-        // 粗暴提取 text 字段演示（建议换 JSON 解析）
-        String msg = extractJsonField(t, "text");
-        bridge.sendText(msg == null ? "" : msg);
-      } else if (t.contains("\"type\":\"close\"")) {
-        bridge.close();
-        Tio.remove(channelContext, "client requested close");
-      } else {
-        // 未识别：回显一下
-        Tio.send(channelContext, WebSocketResponse.fromText("{\"type\":\"ignored\",\"raw\":" + quote(text) + "}", CHARSET));
+    if (bridge == null && msg != null && msg.getType() != null) {
+      String typeStr = msg.getType().trim().toUpperCase();
+      WsVoiceAgentType typeEnum = null;
+      try {
+        typeEnum = WsVoiceAgentType.valueOf(typeStr);
+      } catch (Exception ex) {
+        // 未识别的 type，降级处理
+        log.debug("未知的 type: {}", typeStr);
+      }
+      switch (typeEnum) {
+      case SETUP:
+        String systemPrompt = msg.getSystem_prompt() == null ? "" : msg.getSystem_prompt();
+        String userPrompt = msg.getUser_prompt() == null ? "" : msg.getUser_prompt();
+        connectLLM(channelContext, systemPrompt, userPrompt);
+        // 回显确认
+        String json = toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.SETUP_RECEIVED.name()));
+        Tio.send(channelContext, WebSocketResponse.fromText(json, CHARSET));
+        break;
+      default:
+        break;
       }
       return null;
     }
 
-    // 非 JSON：当普通文本转发给 Gemini
-    bridge.sendText(text);
+    if (bridge == null) {
+      String respJson = toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.ERROR.name(), "no bridge"));
+      Tio.send(channelContext, WebSocketResponse.fromText(respJson, CHARSET));
+      return null;
+    }
+
+    try {
+      if (msg != null && msg.getType() != null) {
+        String typeStr = msg.getType().trim().toUpperCase();
+        WsVoiceAgentType typeEnum = null;
+        try {
+          typeEnum = WsVoiceAgentType.valueOf(typeStr);
+        } catch (Exception ex) {
+          // 未识别的 type，降级处理
+          log.debug("未知的 type: {}", typeStr);
+        }
+
+        if (typeEnum != null) {
+          switch (typeEnum) {
+          case AUDIO_END:
+            bridge.sendAudioStreamEnd();
+            break;
+
+          case TEXT:
+            String userText = msg.getText() == null ? "" : msg.getText();
+            bridge.sendText(userText);
+            break;
+
+          case CLOSE:
+            bridge.close();
+            Tio.remove(channelContext, "client requested close");
+            break;
+
+          default:
+            // 其它类型：回显原始 JSON
+            Tio.send(channelContext, WebSocketResponse
+                .fromText(toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.IGNORED.name(), t)), CHARSET));
+            break;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.error(e.getMessage(), e);
+    }
     return null;
   }
 
-  private static String extractJsonField(String json, String field) {
-    // 演示用的极简实现：生产请用 JSON 库
-    String key = "\"" + field + "\":";
-    int idx = json.indexOf(key);
-    if (idx < 0) return null;
-    int start = json.indexOf('"', idx + key.length());
-    if (start < 0) return null;
-    int end = json.indexOf('"', start + 1);
-    if (end < 0) return null;
-    return json.substring(start + 1, end);
+  private String toJson(WsVoiceAgentResponseMessage wsVoiceAgentResponseMessage) {
+    return JsonUtils.toSkipNullJson(wsVoiceAgentResponseMessage);
   }
 
-  private static String quote(String s) {
-    if (s == null) return "\"\"";
-    return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+  private void connectLLM(ChannelContext channelContext, String systemPrompt, String userPrompt) {
+    String k = key(channelContext);
+
+    BridgeFrontendSender sender = new BridgeFrontendSender() {
+      @Override
+      public void sendText(String json) {
+        WebSocketResponse wsResp = WebSocketResponse.fromText(json, CHARSET);
+        Tio.send(channelContext, wsResp);
+      }
+
+      @Override
+      public void sendBinary(byte[] bytes) {
+        WebSocketResponse wsResp = WebSocketResponse.fromBytes(bytes);
+        Tio.send(channelContext, wsResp);
+      }
+
+      @Override
+      public void close(String reason) {
+        Tio.remove(channelContext, reason);
+      }
+    };
+
+    GeminiLiveBridge bridge = new GeminiLiveBridge(sender);
+    bridge.setPrompts(systemPrompt, userPrompt);
+    BRIDGES.put(k, bridge);
+    // 连接 Gemini Live（异步）
+    bridge.connect();
   }
 }

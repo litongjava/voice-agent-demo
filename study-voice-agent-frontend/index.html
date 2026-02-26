@@ -8,12 +8,14 @@
         body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
         .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
         button { padding: 10px 14px; cursor: pointer; }
-        input, select { padding: 10px; min-width: 280px; }
+        input, select, textarea { padding: 10px; min-width: 280px; }
         .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-top: 14px; }
         .muted { color: #666; font-size: 12px; }
         pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 12px; border-radius: 8px; }
         .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
         @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+        .col { display:flex; flex-direction:column; gap:8px; }
+        label.small { font-size: 13px; color:#333; }
     </style>
 </head>
 <body>
@@ -28,6 +30,18 @@
     </div>
     <div class="muted">
         默认会用当前站点推导：ws(s)://{host}/api/v1/voice/agent
+    </div>
+
+    <!-- 新增：系统提示词 与 用户提示词 -->
+    <div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap;">
+        <div class="col" style="flex:1; min-width:240px;">
+            <label class="small">系统提示词（system prompt）</label>
+            <textarea id="systemPrompt" rows="3" placeholder="在此输入系统提示词，例如：你是一个友好的语音助手，始终简洁回答。"></textarea>
+        </div>
+        <div class="col" style="flex:1; min-width:240px;">
+            <label class="small">用户提示词（user prompt）</label>
+            <textarea id="userPrompt" rows="3" placeholder="在此输入给模型的用户提示词（可选）"></textarea>
+        </div>
     </div>
 </div>
 

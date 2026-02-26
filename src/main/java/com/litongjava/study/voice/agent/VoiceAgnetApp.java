@@ -11,7 +11,7 @@ import com.litongjava.tio.boot.server.TioBootServer;
 public class VoiceAgnetApp {
   public static void main(String[] args) {
     long start = System.currentTimeMillis();
-    
+
     // 1. 虚拟线程工厂（用于 work 线程）
     ThreadFactory workTf = Thread.ofVirtual().name("t-io-v-", 1).factory();
 
@@ -24,7 +24,7 @@ public class VoiceAgnetApp {
     ThreadFactory bizTf = Thread.ofVirtual().name("t-biz-v-", 0).factory();
     ExecutorService bizExecutor = Executors.newThreadPerTaskExecutor(bizTf);
     server.setBizExecutor(bizExecutor);
-    
+
     VaAdminConfig vaAdminConfig = new VaAdminConfig();
     TioApplication.run(VoiceAgnetApp.class, vaAdminConfig, args);
     long end = System.currentTimeMillis();

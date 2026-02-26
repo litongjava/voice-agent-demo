@@ -30,6 +30,8 @@ import com.google.genai.types.ThinkingConfig;
 import com.google.genai.types.TurnCoverage;
 import com.google.genai.types.VoiceConfig;
 import com.litongjava.gemini.GeminiClient;
+import com.litongjava.study.voice.agent.model.WsVoiceAgentResponseMessage;
+import com.litongjava.tio.utils.json.JsonUtils;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -45,6 +47,10 @@ public class GeminiLiveBridge {
   private final Client client;
   private volatile AsyncSession session;
   private final BridgeFrontendSender sender;
+
+  // 存储 prompts
+  private volatile String systemPrompt = "";
+  private volatile String userPrompt = "";
 
   public GeminiLiveBridge(BridgeFrontendSender sender) {
     this.sender = sender;
@@ -62,26 +68,33 @@ public class GeminiLiveBridge {
     LiveConnectConfig config = buildLiveConfig();
 
     // AsyncLive.connect(model, config) -> CompletableFuture<AsyncSession>
-    return client.async.live.connect(MODEL, config) // :contentReference[oaicite:7]{index=7}
-        .thenCompose(sess -> {
-          this.session = sess;
-          sender.sendText("{\"type\":\"gemini_connected\",\"sessionId\":\"" + safe(sess.sessionId()) + "\"}");
+    return client.async.live.connect(MODEL, config).thenCompose(sess -> {
+      this.session = sess;
+      send(new WsVoiceAgentResponseMessage("gemini_connected", sess.sessionId()));
 
-          // 注册 receive 回调（只注册一次） :contentReference[oaicite:8]{index=8}
-          return sess.receive(this::onGeminiMessage);
-        }).exceptionally(ex -> {
-          log.error("Gemini live connect failed", ex);
-          sender.sendText("{\"type\":\"error\",\"where\":\"connect\",\"message\":\"" + safe(ex.getMessage()) + "\"}");
-          sender.close("gemini connect failed");
-          return null;
-        });
+      // 如果连接建立时已存在 prompts（可能前端先发 setup），立即发送到模型
+      try {
+        sendPromptsIfAny(sess);
+      } catch (Exception ex) {
+        log.error("send setup prompts error (connect)", ex);
+        send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+      }
+
+      // 注册 receive 回调（只注册一次）
+      return sess.receive(this::onGeminiMessage);
+    }).exceptionally(ex -> {
+      log.error("Gemini live connect failed", ex);
+      send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+      sender.close("gemini connect failed");
+      return null;
+    });
   }
 
   public CompletableFuture<Void> close() {
     try {
       AsyncSession s = this.session;
       if (s != null) {
-        return s.close().exceptionally(ex -> null); // :contentReference[oaicite:9]{index=9}
+        return s.close().exceptionally(ex -> null);
       }
     } finally {
       try {
@@ -98,16 +111,14 @@ public class GeminiLiveBridge {
     if (s == null)
       return CompletableFuture.completedFuture(null);
 
-    Blob audioBlob = Blob.builder().mimeType(INPUT_MIME).data(pcm16k).build(); // :contentReference[oaicite:10]{index=10}
+    Blob audioBlob = Blob.builder().mimeType(INPUT_MIME).data(pcm16k).build();
 
-    LiveSendRealtimeInputParameters params = LiveSendRealtimeInputParameters.builder().audio(audioBlob).build(); // :contentReference[oaicite:11]{index=11}
+    LiveSendRealtimeInputParameters params = LiveSendRealtimeInputParameters.builder().audio(audioBlob).build();
 
-    return s.sendRealtimeInput(params) // :contentReference[oaicite:12]{index=12}
-        .exceptionally(ex -> {
-          sender.sendText(
-              "{\"type\":\"error\",\"where\":\"sendRealtimeInput\",\"message\":\"" + safe(ex.getMessage()) + "\"}");
-          return null;
-        });
+    return s.sendRealtimeInput(params).exceptionally(ex -> {
+      send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+      return null;
+    });
   }
 
   /** 前端说“音频结束”（可选，用于提示流结束） */
@@ -116,9 +127,12 @@ public class GeminiLiveBridge {
     if (s == null)
       return CompletableFuture.completedFuture(null);
 
-    LiveSendRealtimeInputParameters params = LiveSendRealtimeInputParameters.builder().audioStreamEnd(true).build(); // :contentReference[oaicite:13]{index=13}
+    LiveSendRealtimeInputParameters params = LiveSendRealtimeInputParameters.builder().audioStreamEnd(true).build();
 
-    return s.sendRealtimeInput(params).exceptionally(ex -> null); // :contentReference[oaicite:14]{index=14}
+    return s.sendRealtimeInput(params).exceptionally(ex -> {
+      send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+      return null;
+    });
   }
 
   /** 前端发文本输入（可选） */
@@ -132,14 +146,58 @@ public class GeminiLiveBridge {
     LiveSendClientContentParameters cc = LiveSendClientContentParameters.builder().turns(List.of(userMessage))
         .turnComplete(true).build();
 
-    return s.sendClientContent(cc).exceptionally(ex -> null);
+    return s.sendClientContent(cc).exceptionally(ex -> {
+      send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+      return null;
+    });
   }
 
   // ---------------- internal ----------------
 
+  public void setPrompts(String systemPrompt, String userPrompt) {
+    this.systemPrompt = systemPrompt == null ? "" : systemPrompt;
+    this.userPrompt = userPrompt == null ? "" : userPrompt;
+    log.info("Prompts set: system.len={} user.len={}", this.systemPrompt.length(), this.userPrompt.length());
+
+    // 如果 session 已经建立，则立即发送到模型（处理前端先 connect 后 send setup 的情况）
+    AsyncSession s = this.session;
+    if (s != null) {
+      try {
+        sendPromptsIfAny(s);
+      } catch (Exception ex) {
+        log.error("send setup prompts error (in setPrompts)", ex);
+        send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+      }
+    }
+  }
+
+  private void sendPromptsIfAny(AsyncSession s) {
+    if ((systemPrompt != null && !systemPrompt.isEmpty()) || (userPrompt != null && !userPrompt.isEmpty())) {
+      List<Content> initialTurns = new java.util.ArrayList<>();
+      if (systemPrompt != null && !systemPrompt.isEmpty()) {
+        initialTurns.add(Content.fromParts(Part.fromText(systemPrompt)));
+      }
+      if (userPrompt != null && !userPrompt.isEmpty()) {
+        initialTurns.add(Content.fromParts(Part.fromText(userPrompt)));
+      }
+
+      if (!initialTurns.isEmpty()) {
+        LiveSendClientContentParameters cc = LiveSendClientContentParameters.builder().turns(initialTurns)
+            // 初始化指令通常作为 context 而非单次完成的用户 turn，你可按需调整 turnComplete
+            .turnComplete(false).build();
+
+        s.sendClientContent(cc).exceptionally(ex -> {
+          send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
+          return null;
+        });
+
+        send(new WsVoiceAgentResponseMessage("setup_sent_to_model"));
+      }
+    }
+  }
+
   private LiveConnectConfig buildLiveConfig() {
     // 自动VAD配置：AutomaticActivityDetection/RealtimeInputConfig
-    // :contentReference[oaicite:16]{index=16}
     AutomaticActivityDetection vad = AutomaticActivityDetection.builder().disabled(false)
         .startOfSpeechSensitivity(StartSensitivity.Known.START_SENSITIVITY_HIGH)
         .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_LOW).prefixPaddingMs(100).silenceDurationMs(500)
@@ -153,15 +211,10 @@ public class GeminiLiveBridge {
     VoiceConfig voiceConfig = VoiceConfig.builder().prebuiltVoiceConfig(prebuiltVoiceConfig).build();
     SpeechConfig speech = SpeechConfig.builder().voiceConfig(voiceConfig).build();
 
-    // LiveConnectConfig：responseModalities / speechConfig / thinkingConfig /
-    // realtimeInputConfig 等字段在 Javadoc 中列出 :contentReference[oaicite:17]{index=17}
-    com.google.genai.types.LiveConnectConfig.Builder builder = LiveConnectConfig.builder();
-    Modality modality = new Modality(Modality.Known.AUDIO);
-    List<Modality> modalities = List.of(modality);
-
     ThinkingConfig thinkingConfig = ThinkingConfig.builder().thinkingBudget(0).build();
     AudioTranscriptionConfig inputAudioTranscription = AudioTranscriptionConfig.builder().build();
-    LiveConnectConfig liveConnectConfig = builder.responseModalities(modalities)
+    LiveConnectConfig liveConnectConfig = LiveConnectConfig.builder()
+        .responseModalities(List.of(new Modality(Modality.Known.AUDIO)))
         //
         .speechConfig(speech).thinkingConfig(thinkingConfig).realtimeInputConfig(realtimeInput)
         // 可选：转写
@@ -175,7 +228,7 @@ public class GeminiLiveBridge {
   private void onGeminiMessage(LiveServerMessage msg) {
     try {
       if (msg.setupComplete().isPresent()) {
-        sender.sendText("{\"type\":\"setup_complete\"}");
+        send(new WsVoiceAgentResponseMessage("setup_complete"));
       }
 
       Optional<LiveServerContent> serverContentOpt = msg.serverContent();
@@ -183,19 +236,17 @@ public class GeminiLiveBridge {
         LiveServerContent sc = serverContentOpt.get();
 
         // 输入转写
-        sc.inputTranscription()
-            .ifPresent(t -> sender.sendText("{\"type\":\"transcript_in\",\"text\":\"" + safe(t.text()) + "\"}"));
+        sc.inputTranscription().ifPresent(t -> send(new WsVoiceAgentResponseMessage("transcript_in", t.text())));
 
         // 输出转写
-        sc.outputTranscription()
-            .ifPresent(t -> sender.sendText("{\"type\":\"transcript_out\",\"text\":\"" + safe(t.text()) + "\"}"));
+        sc.outputTranscription().ifPresent(t -> send(new WsVoiceAgentResponseMessage("transcript_out", t.text())));
 
         // 模型输出（音频/文本 part）
         sc.modelTurn().ifPresent(content -> {
           content.parts().ifPresent(parts -> {
             for (Part p : parts) {
               // 文本
-              p.text().ifPresent(txt -> sender.sendText("{\"type\":\"text\",\"text\":\"" + safe(txt) + "\"}"));
+              p.text().ifPresent(txt -> send(new WsVoiceAgentResponseMessage("text", txt)));
 
               // 音频（inlineData）
               p.inlineData().ifPresent(blob -> {
@@ -207,14 +258,17 @@ public class GeminiLiveBridge {
                 } else if (data != null) {
                   // 兜底：非音频inlineData，走base64文本
                   String b64 = Base64.getEncoder().encodeToString(data);
-                  sender.sendText(
-                      "{\"type\":\"inline_data\",\"mimeType\":\"" + safe(mt) + "\",\"data\":\"" + b64 + "\"}");
+                  WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("inline_data");
+                  m.setText(b64);
+                  send(m);
                 }
               });
 
               // functionCall 等你后续再扩展
               p.functionCall().ifPresent(fc -> {
-                sender.sendText("{\"type\":\"function_call\",\"name\":\"" + safe(fc.name().orElse("")) + "\"}");
+                WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("function_call");
+                m.setText(fc.name().orElse(""));
+                send(m);
               });
             }
           });
@@ -222,26 +276,50 @@ public class GeminiLiveBridge {
 
         // turnComplete
         if (sc.turnComplete().orElse(false)) {
-          sender.sendText("{\"type\":\"turn_complete\"}");
+          send(new WsVoiceAgentResponseMessage("turn_complete"));
         }
       }
 
       // goAway（服务端提示将断开）
-
       msg.goAway().ifPresent(g -> {
         String timeLeft = g.timeLeft().map(Duration::toString) // 例如 PT30S / PT1M
             .orElse("");
-        sender.sendText("{\"type\":\"go_away\",\"timeLeft\":\"" + safe(timeLeft) + "\"}");
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("go_away");
+        m.setText(timeLeft);
+        send(m);
       });
 
       // usage
-      msg.usageMetadata().ifPresent(u -> sender.sendText("{\"type\":\"usage\",\"prompt\":" + u.promptTokenCount()
-          + ",\"response\":" + u.responseTokenCount() + ",\"total\":" + u.totalTokenCount() + "}"));
+      msg.usageMetadata().ifPresent(u -> {
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("usage");
+        // 将 usage 信息编码到 text 字段或扩展 DTO；此处把三个数字拼接（可按需改成专门字段）
+        Optional<Integer> promptTokenCount = u.promptTokenCount();
+        Optional<Integer> responseTokenCount = u.responseTokenCount();
+        Optional<Integer> totalTokenCount = u.totalTokenCount();
+        m.setPromptTokenCount(promptTokenCount);
+        m.setResponseTokenCount(responseTokenCount);
+        m.setTotalTokenCount(totalTokenCount);
+        send(m);
+      });
 
     } catch (Exception e) {
       log.error("onGeminiMessage error", e);
-      sender
-          .sendText("{\"type\":\"error\",\"where\":\"onGeminiMessage\",\"message\":\"" + safe(e.getMessage()) + "\"}");
+      send(new WsVoiceAgentResponseMessage("error", safe(e.getMessage())));
+    }
+  }
+
+  private void send(WsVoiceAgentResponseMessage msg) {
+    try {
+      String json = JsonUtils.toSkipNullJson(msg);
+      sender.sendText(json);
+    } catch (Exception e) {
+      log.error("serialize message error", e);
+      // fallback minimal message
+//      WsVoiceAgentResponseMessage wsVoiceAgentResponseMessage = new WsVoiceAgentResponseMessage();
+//      wsVoiceAgentResponseMessage.setType(WsVoiceAgentType.ERROR.name());
+//      wsVoiceAgentResponseMessage.setMessage("serialize error");
+      // 手写性能高
+      sender.sendText("{\"type\":\"error\",\"message\":\"serialize error\"}");
     }
   }
 

@@ -15,6 +15,10 @@ const logEl = el("log");
 const playStateEl = el("playState");
 const btnClearLog = el("btnClearLog");
 
+// 新增两个 prompt 元素
+const systemPromptEl = el("systemPrompt");
+const userPromptEl = el("userPrompt");
+
 function logLine(s) {
     logEl.textContent += s + "\n";
     logEl.scrollTop = logEl.scrollHeight;
@@ -146,6 +150,21 @@ function connectWs() {
         logLine(`[ws] open: ${url}`);
         setUiConnected(true);
         await ensurePlaybackContext();
+
+        // 连接成功后，读取两个 prompt 的值并发送到后端
+        try {
+            const systemPrompt = systemPromptEl.value?.trim() || "";
+            const userPrompt = userPromptEl.value?.trim() || "";
+            const setupMsg = {
+                type: "setup",
+                system_prompt: systemPrompt,
+                user_prompt: userPrompt
+            };
+            ws.send(JSON.stringify(setupMsg));
+            logLine(`[send] setup: ${JSON.stringify({ system_prompt: systemPrompt, user_prompt: userPrompt })}`);
+        } catch (e) {
+            logLine("[send] setup error: " + (e?.message || e));
+        }
     };
 
     ws.onclose = (e) => {
@@ -168,7 +187,7 @@ function connectWs() {
                 else if (obj.type === "text") logLine(`[txt] ${obj.text || ""}`);
                 else if (obj.type === "turn_complete") logLine("[turn] complete");
                 else if (obj.type === "setup_complete") logLine("[setup] complete");
-                else if (obj.type === "usage") logLine(`[usage] prompt=${obj.prompt} response=${obj.response} total=${obj.total}`);
+                else if (obj.type === "usage") logLine(`[usage] prompt=${obj.promptTokenCount} response=${obj.responseTokenCount} total=${obj.totalTokenCount}`);
                 else if (obj.type === "go_away") logLine(`[goAway] timeLeft=${obj.timeLeft}`);
                 else if (obj.type === "error") logLine(`[err] ${obj.where || ""}: ${obj.message || ""}`);
                 else logLine(`[evt] ${evt.data}`);
