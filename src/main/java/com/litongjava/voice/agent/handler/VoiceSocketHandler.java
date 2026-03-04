@@ -8,6 +8,7 @@ import com.litongjava.tio.core.ChannelContext;
 import com.litongjava.tio.core.Tio;
 import com.litongjava.tio.http.common.HttpRequest;
 import com.litongjava.tio.http.common.HttpResponse;
+import com.litongjava.tio.utils.environment.EnvUtils;
 import com.litongjava.tio.utils.json.JsonUtils;
 import com.litongjava.tio.websocket.common.WebSocketRequest;
 import com.litongjava.tio.websocket.common.WebSocketResponse;
@@ -192,13 +193,16 @@ public class VoiceSocketHandler implements IWebSocketHandler {
       log.warn("start recorder failed: {}", e.getMessage());
     }
 
+    if (platform == null) {
+      platform = EnvUtils.getStr("vioce.agent.platform");
+    }
     RealtimeModelBridge bridge = null;
     if (ModelPlatformName.GOOGLE.equals(platform)) {
       bridge = new GoogleGeminiRealtimeBridge(callback);
 
-    }
-    if (ModelPlatformName.BAILIAN.equals(platform)) {
-      bridge = new GoogleGeminiRealtimeBridge(callback);
+    } else if (ModelPlatformName.BAILIAN.equals(platform)) {
+      bridge = new QwenOmniRealtimeBridge(callback);
+
     } else {
       bridge = new QwenOmniRealtimeBridge(callback);
     }
