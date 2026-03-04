@@ -3,22 +3,19 @@ package com.litongjava.voice.agent.handler;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import com.litongjava.consts.ModelPlatformName;
 import com.litongjava.tio.core.ChannelContext;
 import com.litongjava.tio.core.Tio;
 import com.litongjava.tio.http.common.HttpRequest;
 import com.litongjava.tio.http.common.HttpResponse;
-import com.litongjava.tio.utils.environment.EnvUtils;
 import com.litongjava.tio.utils.json.JsonUtils;
 import com.litongjava.tio.websocket.common.WebSocketRequest;
 import com.litongjava.tio.websocket.common.WebSocketResponse;
 import com.litongjava.tio.websocket.common.WebSocketSessionContext;
 import com.litongjava.tio.websocket.server.handler.IWebSocketHandler;
 import com.litongjava.voice.agent.audio.SessionAudioRecorder;
-import com.litongjava.voice.agent.bridge.GoogleGeminiRealtimeBridge;
-import com.litongjava.voice.agent.bridge.QwenOmniRealtimeBridge;
 import com.litongjava.voice.agent.bridge.RealtimeBridgeCallback;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridge;
+import com.litongjava.voice.agent.bridge.RealtimeModelBridgeFactory;
 import com.litongjava.voice.agent.bridge.RealtimeSetup;
 import com.litongjava.voice.agent.callback.WsRealtimeBridgeCallback;
 import com.litongjava.voice.agent.consts.VoiceAgentConst;
@@ -184,8 +181,6 @@ public class VoiceSocketHandler implements IWebSocketHandler {
   private void connectLLM(ChannelContext channelContext, String platform, RealtimeSetup setup) {
     String k = ChannelContextUtils.key(channelContext);
 
-    RealtimeBridgeCallback callback = new WsRealtimeBridgeCallback(channelContext);
-    callback.start(setup);
     // 启动 recorder（用户是 16k，模型默认 24k）
     try {
       SessionAudioRecorder.start(k, 16000, 24000);
@@ -193,21 +188,12 @@ public class VoiceSocketHandler implements IWebSocketHandler {
       log.warn("start recorder failed: {}", e.getMessage());
     }
 
-    if (platform == null) {
-      platform = EnvUtils.getStr("vioce.agent.platform");
-    }
-    RealtimeModelBridge bridge = null;
-    if (ModelPlatformName.GOOGLE.equals(platform)) {
-      bridge = new GoogleGeminiRealtimeBridge(callback);
-
-    } else if (ModelPlatformName.BAILIAN.equals(platform)) {
-      bridge = new QwenOmniRealtimeBridge(callback);
-
-    } else {
-      bridge = new QwenOmniRealtimeBridge(callback);
-    }
+    RealtimeBridgeCallback callback = new WsRealtimeBridgeCallback(channelContext);
+    callback.start(setup);
+    RealtimeModelBridge bridge = RealtimeModelBridgeFactory.createBridge(platform, callback);
     BRIDGES.put(k, bridge);
     // 连接 Gemini Live（异步）
     bridge.connect(setup);
   }
+
 }
