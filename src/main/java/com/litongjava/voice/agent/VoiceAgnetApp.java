@@ -1,9 +1,11 @@
 package com.litongjava.voice.agent;
 
+
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 
+import com.litongjava.media.NativeMedia;
 import com.litongjava.tio.boot.TioApplication;
 import com.litongjava.tio.boot.server.TioBootServer;
 import com.litongjava.voice.agent.config.VaAdminConfig;
@@ -11,7 +13,8 @@ import com.litongjava.voice.agent.config.VaAdminConfig;
 public class VoiceAgnetApp {
   public static void main(String[] args) {
     long start = System.currentTimeMillis();
-
+    NativeMedia.init();
+    
     // 1. 虚拟线程工厂（用于 work 线程）
     ThreadFactory workTf = Thread.ofVirtual().name("t-io-v-", 1).factory();
 
@@ -24,7 +27,7 @@ public class VoiceAgnetApp {
     ThreadFactory bizTf = Thread.ofVirtual().name("t-biz-v-", 0).factory();
     ExecutorService bizExecutor = Executors.newThreadPerTaskExecutor(bizTf);
     server.setBizExecutor(bizExecutor);
-
+    
     VaAdminConfig vaAdminConfig = new VaAdminConfig();
     TioApplication.run(VoiceAgnetApp.class, vaAdminConfig, args);
     long end = System.currentTimeMillis();

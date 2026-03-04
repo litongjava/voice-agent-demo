@@ -1,7 +1,5 @@
 package com.litongjava.voice.agent.model;
 
-
-
 import java.util.Optional;
 
 import lombok.AllArgsConstructor;

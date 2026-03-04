@@ -1,7 +1,6 @@
 package com.litongjava.voice.agent.handler;
 
 
-
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -14,25 +13,23 @@ import com.litongjava.tio.websocket.common.WebSocketRequest;
 import com.litongjava.tio.websocket.common.WebSocketResponse;
 import com.litongjava.tio.websocket.common.WebSocketSessionContext;
 import com.litongjava.tio.websocket.server.handler.IWebSocketHandler;
-import com.litongjava.voice.agent.bridge.BridgeFrontendSender;
+import com.litongjava.voice.agent.audio.SessionAudioRecorder;
 import com.litongjava.voice.agent.bridge.GeminiLiveBridge;
+import com.litongjava.voice.agent.bridge.RealtimeBridgeCallback;
+import com.litongjava.voice.agent.bridge.RealtimeSetup;
+import com.litongjava.voice.agent.callback.WsRealtimeBridgeCallback;
+import com.litongjava.voice.agent.consts.VoiceAgentConst;
 import com.litongjava.voice.agent.model.WsVoiceAgentRequestMessage;
 import com.litongjava.voice.agent.model.WsVoiceAgentResponseMessage;
 import com.litongjava.voice.agent.model.WsVoiceAgentType;
+import com.litongjava.voice.agent.utils.ChannelContextUtils;
 
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class VoiceSocketHandler implements IWebSocketHandler {
-  public static final String CHARSET = "utf-8";
-
   // 一个前端连接一个 bridge
   private static final Map<String, GeminiLiveBridge> BRIDGES = new ConcurrentHashMap<>();
-
-  private String key(ChannelContext ctx) {
-    // 用 tio 自己的唯一标识
-    return ctx.getId();
-  }
 
   @Override
   public HttpResponse handshake(HttpRequest httpRequest, HttpResponse response, ChannelContext channelContext)
@@ -49,7 +46,7 @@ public class VoiceSocketHandler implements IWebSocketHandler {
 
   @Override
   public Object onClose(WebSocketRequest wsRequest, byte[] bytes, ChannelContext channelContext) throws Exception {
-    String k = key(channelContext);
+    String k = ChannelContextUtils.key(channelContext);
     GeminiLiveBridge bridge = BRIDGES.remove(k);
     if (bridge != null) {
       bridge.close();
@@ -60,8 +57,15 @@ public class VoiceSocketHandler implements IWebSocketHandler {
 
   @Override
   public Object onBytes(WebSocketRequest wsRequest, byte[] bytes, ChannelContext channelContext) throws Exception {
-    // 前端推：16k PCM mono 裸流
-    GeminiLiveBridge bridge = BRIDGES.get(key(channelContext));
+    String k = ChannelContextUtils.key(channelContext);
+    // 前端推：16k PCM mono 裸流,记录用户上行音频（前端发来 16k PCM）
+    try {
+      SessionAudioRecorder.appendUserPcm(k, bytes);
+    } catch (Exception ex) {
+      log.warn("appendUserPcm failed: {}", ex.getMessage());
+    }
+
+    GeminiLiveBridge bridge = BRIDGES.get(ChannelContextUtils.key(channelContext));
     if (bridge != null) {
       bridge.sendPcm16k(bytes);
     }
@@ -88,7 +92,7 @@ public class VoiceSocketHandler implements IWebSocketHandler {
       log.error("解析收到的消息异常", e);
       return null;
     }
-    GeminiLiveBridge bridge = BRIDGES.get(key(channelContext));
+    GeminiLiveBridge bridge = BRIDGES.get(ChannelContextUtils.key(channelContext));
 
     if (bridge == null && msg != null && msg.getType() != null) {
       String typeStr = msg.getType().trim().toUpperCase();
@@ -101,12 +105,20 @@ public class VoiceSocketHandler implements IWebSocketHandler {
       }
       switch (typeEnum) {
       case SETUP:
-        String systemPrompt = msg.getSystem_prompt() == null ? "" : msg.getSystem_prompt();
-        String userPrompt = msg.getUser_prompt() == null ? "" : msg.getUser_prompt();
-        connectLLM(channelContext, systemPrompt, userPrompt);
+        String systemPrompt = msg.getSystem_prompt();
+        String user_prompt = msg.getUser_prompt();
+        String job_description = msg.getJob_description();
+        String resume = msg.getResume();
+        String questions = msg.getQuestions();
+        String greeting = msg.getGreeting();
+
+        RealtimeSetup realtimeSetup = new RealtimeSetup(systemPrompt, user_prompt, job_description, resume, questions,
+            greeting);
+
+        connectLLM(channelContext, realtimeSetup);
         // 回显确认
         String json = toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.SETUP_RECEIVED.name()));
-        Tio.send(channelContext, WebSocketResponse.fromText(json, CHARSET));
+        Tio.send(channelContext, WebSocketResponse.fromText(json, VoiceAgentConst.CHARSET));
         break;
       default:
         break;
@@ -116,7 +128,7 @@ public class VoiceSocketHandler implements IWebSocketHandler {
 
     if (bridge == null) {
       String respJson = toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.ERROR.name(), "no bridge"));
-      Tio.send(channelContext, WebSocketResponse.fromText(respJson, CHARSET));
+      Tio.send(channelContext, WebSocketResponse.fromText(respJson, VoiceAgentConst.CHARSET));
       return null;
     }
 
@@ -149,8 +161,8 @@ public class VoiceSocketHandler implements IWebSocketHandler {
 
           default:
             // 其它类型：回显原始 JSON
-            Tio.send(channelContext, WebSocketResponse
-                .fromText(toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.IGNORED.name(), t)), CHARSET));
+            Tio.send(channelContext, WebSocketResponse.fromText(
+                toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.IGNORED.name(), t)), VoiceAgentConst.CHARSET));
             break;
           }
         }
@@ -165,32 +177,21 @@ public class VoiceSocketHandler implements IWebSocketHandler {
     return JsonUtils.toSkipNullJson(wsVoiceAgentResponseMessage);
   }
 
-  private void connectLLM(ChannelContext channelContext, String systemPrompt, String userPrompt) {
-    String k = key(channelContext);
+  private void connectLLM(ChannelContext channelContext, RealtimeSetup setup) {
+    String k = ChannelContextUtils.key(channelContext);
 
-    BridgeFrontendSender sender = new BridgeFrontendSender() {
-      @Override
-      public void sendText(String json) {
-        WebSocketResponse wsResp = WebSocketResponse.fromText(json, CHARSET);
-        Tio.send(channelContext, wsResp);
-      }
+    RealtimeBridgeCallback callback = new WsRealtimeBridgeCallback(channelContext);
+    callback.start(setup);
+    // 启动 recorder（用户是 16k，模型默认 24k）
+    try {
+      SessionAudioRecorder.start(k, 16000, 24000);
+    } catch (Exception e) {
+      log.warn("start recorder failed: {}", e.getMessage());
+    }
 
-      @Override
-      public void sendBinary(byte[] bytes) {
-        WebSocketResponse wsResp = WebSocketResponse.fromBytes(bytes);
-        Tio.send(channelContext, wsResp);
-      }
-
-      @Override
-      public void close(String reason) {
-        Tio.remove(channelContext, reason);
-      }
-    };
-
-    GeminiLiveBridge bridge = new GeminiLiveBridge(sender);
-    bridge.setPrompts(systemPrompt, userPrompt);
+    GeminiLiveBridge bridge = new GeminiLiveBridge(callback);
     BRIDGES.put(k, bridge);
     // 连接 Gemini Live（异步）
-    bridge.connect();
+    bridge.connect(setup);
   }
 }

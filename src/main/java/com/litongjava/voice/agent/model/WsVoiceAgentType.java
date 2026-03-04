@@ -1,6 +1,5 @@
 package com.litongjava.voice.agent.model;
 
-
 /**
  * WebSocket 消息类型枚举
  */
