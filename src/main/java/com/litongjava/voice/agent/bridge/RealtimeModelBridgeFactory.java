@@ -17,7 +17,7 @@ public class RealtimeModelBridgeFactory {
       bridge = new QwenOmniRealtimeBridge(callback);
 
     } else {
-      bridge = new QwenOmniRealtimeBridge(callback);
+      bridge = new GoogleGeminiRealtimeBridge(callback);
     }
     return bridge;
   }

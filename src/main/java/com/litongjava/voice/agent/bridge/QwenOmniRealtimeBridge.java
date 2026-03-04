@@ -183,16 +183,20 @@ public class QwenOmniRealtimeBridge implements RealtimeModelBridge {
         //
         .enableInputAudioTranscription(true)
         //
-        .enableTurnDetection(useServerVad)
-        //
-        .parameters(Map.of("instructions", instructions));
+        .enableTurnDetection(useServerVad);
+    //
+
+    if (instructions != null) {
+      b.parameters(Map.of("instructions", instructions));
+    }
 
     return b.build();
   }
 
   private String buildInstructions(RealtimeSetup setup) {
-    if (setup == null)
-      return "你是一个专业、简洁的语音助手。";
+    if (setup == null) {
+      return null;
+    }
 
     StringBuilder sb = new StringBuilder();
     if (StrUtil.notBlank(setup.getSystem_prompt()))
@@ -205,7 +209,7 @@ public class QwenOmniRealtimeBridge implements RealtimeModelBridge {
       sb.append(setup.getGreeting()).append("\n");
     if (StrUtil.notBlank(setup.getQuestions()))
       sb.append(setup.getQuestions()).append("\n");
-    return sb.length() == 0 ? "你是一个专业、简洁的语音助手。" : sb.toString();
+    return sb.length() == 0 ? null : sb.toString();
   }
 
   private void handleEvent(JsonObject event) {
