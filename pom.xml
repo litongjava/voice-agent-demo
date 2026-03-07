@@ -81,6 +81,11 @@
       <version>4.4.0</version>
     </dependency>
 
+    <dependency>
+      <groupId>com.litongjava</groupId>
+      <artifactId>java-tio-sip</artifactId>
+      <version>1.0.0</version>
+    </dependency>
 
     <!-- JUnit 用于测试 -->
     <dependency>

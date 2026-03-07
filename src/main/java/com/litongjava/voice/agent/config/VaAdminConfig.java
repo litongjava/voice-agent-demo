@@ -1,6 +1,5 @@
 package com.litongjava.voice.agent.config;
 
-
 import java.util.Optional;
 
 import com.google.genai.ApiClient;
@@ -35,6 +34,16 @@ public class VaAdminConfig implements BootConfiguration {
     configHandler(server);
     configWebSocket(server);
     configGeminiProxy();
+
+//    UdpServerConf udpServerConf = new UdpServerConf(30000, new RtpEchoUdpHandler(), 5000);
+//    UdpServer udpServer;
+//    try {
+//      udpServer = new UdpServer(udpServerConf);
+//      udpServer.start();
+//    } catch (SocketException e) {
+//      e.printStackTrace();
+//    }
+
   }
 
   private void configInterceptor() {
