@@ -21,8 +21,7 @@ public class RealtimeMediaProcessor implements MediaProcessor {
   private final SipSessionRegistry sessionRegistry;
 
   public RealtimeMediaProcessor() {
-    this(EnvUtils.getStr("vioce.agent.platform"), RealtimeSetupFactory.buildFromEnv(),
-        new SipSessionRegistry());
+    this(EnvUtils.getStr("vioce.agent.platform"), RealtimeSetupFactory.buildFromEnv(), new SipSessionRegistry());
   }
 
   public RealtimeMediaProcessor(String platform, RealtimeSetup defaultSetup, SipSessionRegistry sessionRegistry) {
