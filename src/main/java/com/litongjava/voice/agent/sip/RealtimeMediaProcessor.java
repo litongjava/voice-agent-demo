@@ -2,6 +2,7 @@ package com.litongjava.voice.agent.sip;
 
 import com.litongjava.sip.model.CallSession;
 import com.litongjava.sip.rtp.codec.AudioResampler;
+import com.litongjava.sip.rtp.codec.NegotiatedAudioFormatResolver;
 import com.litongjava.sip.rtp.codec.PcmCodec;
 import com.litongjava.sip.rtp.media.AudioFrame;
 import com.litongjava.sip.rtp.media.MediaProcessor;
@@ -15,6 +16,9 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class RealtimeMediaProcessor implements MediaProcessor {
+
+  private static final int MODEL_INPUT_SAMPLE_RATE = 16000;
+  private static final int MODEL_OUTPUT_SAMPLE_RATE = 24000;
 
   private final String platform;
   private final RealtimeSetupCallback realtimeSetupCallback;
@@ -47,22 +51,33 @@ public class RealtimeMediaProcessor implements MediaProcessor {
 
     try {
       sipSession.ensureConnected(session);
-      short[] in8k = input.getSamples();
-      if (in8k == null || in8k.length == 0) {
+
+      short[] inputSamples = input.getSamples();
+      if (inputSamples == null || inputSamples.length == 0) {
         return null;
       }
 
-      short[] pcm16k = AudioResampler.resample(in8k, 8000, 16000);
-      byte[] pcm16kBytes = PcmCodec.shortsToLittleEndianBytes(pcm16k);
+      int sessionSampleRate = NegotiatedAudioFormatResolver.resolveSessionPcmSampleRate(session);
+      int inputSampleRate = input.getSampleRate() > 0 ? input.getSampleRate() : sessionSampleRate;
 
+      short[] modelInputSamples = inputSamples;
+      if (inputSampleRate != MODEL_INPUT_SAMPLE_RATE) {
+        modelInputSamples = AudioResampler.resample(inputSamples, inputSampleRate, MODEL_INPUT_SAMPLE_RATE);
+      }
+
+      byte[] pcm16kBytes = PcmCodec.shortsToLittleEndianBytes(modelInputSamples);
       sipSession.sendToModel(pcm16kBytes);
 
-      short[] out8k = sipSession.takeOutputFrame(in8k.length);
-      if (out8k == null) {
+      short[] outputSamples = sipSession.takeOutputFrame(inputSamples.length);
+      if (outputSamples == null) {
         return null;
       }
 
-      return new AudioFrame(out8k, 8000, 1, input.getRtpTimestamp());
+      return new AudioFrame(
+          outputSamples,
+          sessionSampleRate,
+          NegotiatedAudioFormatResolver.resolveChannels(session),
+          input.getRtpTimestamp());
     } catch (Exception e) {
       log.error("process failed, callId={}", callId, e);
       return null;
@@ -104,5 +119,13 @@ public class RealtimeMediaProcessor implements MediaProcessor {
       log.warn("failed to get callId from CallSession", e);
       return null;
     }
+  }
+
+  public static int getModelInputSampleRate() {
+    return MODEL_INPUT_SAMPLE_RATE;
+  }
+
+  public static int getModelOutputSampleRate() {
+    return MODEL_OUTPUT_SAMPLE_RATE;
   }
 }
