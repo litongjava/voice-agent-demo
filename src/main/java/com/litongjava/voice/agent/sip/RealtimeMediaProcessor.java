@@ -9,7 +9,7 @@ import com.litongjava.tio.utils.environment.EnvUtils;
 import com.litongjava.tio.utils.hutool.StrUtil;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridge;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridgeFactory;
-import com.litongjava.voice.agent.bridge.RealtimeSetup;
+import com.litongjava.voice.agent.callback.RealtimeSetupCallback;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -17,16 +17,17 @@ import lombok.extern.slf4j.Slf4j;
 public class RealtimeMediaProcessor implements MediaProcessor {
 
   private final String platform;
-  private final RealtimeSetup defaultSetup;
+  private final RealtimeSetupCallback realtimeSetupCallback;
   private final SipSessionRegistry sessionRegistry;
 
-  public RealtimeMediaProcessor() {
-    this(EnvUtils.getStr("vioce.agent.platform"), RealtimeSetupFactory.buildFromEnv(), new SipSessionRegistry());
+  public RealtimeMediaProcessor(RealtimeSetupCallback realtimeSetupCallback) {
+    this(EnvUtils.getStr("vioce.agent.platform"), realtimeSetupCallback, new SipSessionRegistry());
   }
 
-  public RealtimeMediaProcessor(String platform, RealtimeSetup defaultSetup, SipSessionRegistry sessionRegistry) {
+  public RealtimeMediaProcessor(String platform, RealtimeSetupCallback realtimeSetupCallback,
+      SipSessionRegistry sessionRegistry) {
     this.platform = platform;
-    this.defaultSetup = defaultSetup;
+    this.realtimeSetupCallback = realtimeSetupCallback;
     this.sessionRegistry = sessionRegistry;
   }
 
@@ -45,8 +46,7 @@ public class RealtimeMediaProcessor implements MediaProcessor {
     SipRealtimeSession sipSession = sessionRegistry.getOrCreate(callId, this::createSipSession);
 
     try {
-      sipSession.ensureConnected(defaultSetup);
-
+      sipSession.ensureConnected(session);
       short[] in8k = input.getSamples();
       if (in8k == null || in8k.length == 0) {
         return null;
@@ -90,7 +90,7 @@ public class RealtimeMediaProcessor implements MediaProcessor {
   private SipRealtimeSession createSipSession(String callId) {
     SipRealtimeBridgeCallback callback = new SipRealtimeBridgeCallback(callId);
     RealtimeModelBridge bridge = RealtimeModelBridgeFactory.createBridge(platform, callback);
-    SipRealtimeSession sipSession = new SipRealtimeSession(callId, bridge, callback);
+    SipRealtimeSession sipSession = new SipRealtimeSession(callId, bridge, callback, realtimeSetupCallback);
     callback.bind(sipSession);
     log.info("created realtime sip session, callId={}", callId);
     return sipSession;

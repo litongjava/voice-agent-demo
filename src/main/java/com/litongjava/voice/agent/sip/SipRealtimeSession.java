@@ -4,10 +4,12 @@ import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.litongjava.sip.model.CallSession;
 import com.litongjava.sip.rtp.codec.AudioResampler;
 import com.litongjava.sip.rtp.codec.PcmCodec;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridge;
 import com.litongjava.voice.agent.bridge.RealtimeSetup;
+import com.litongjava.voice.agent.callback.RealtimeSetupCallback;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -20,17 +22,24 @@ public class SipRealtimeSession {
   private final String callId;
   private final RealtimeModelBridge bridge;
   private final SipRealtimeBridgeCallback callback;
+  private final RealtimeSetupCallback realtimeSetupCallback;
   private final AtomicBoolean connected = new AtomicBoolean(false);
   private final ConcurrentLinkedQueue<Short> outputQueue = new ConcurrentLinkedQueue<>();
 
-  public SipRealtimeSession(String callId, RealtimeModelBridge bridge, SipRealtimeBridgeCallback callback) {
+  public SipRealtimeSession(String callId, RealtimeModelBridge bridge, SipRealtimeBridgeCallback callback,
+      RealtimeSetupCallback realtimeSetupCallback) {
     this.callId = callId;
     this.bridge = bridge;
     this.callback = callback;
+    this.realtimeSetupCallback = realtimeSetupCallback;
   }
 
-  public void ensureConnected(RealtimeSetup setup) {
+  public void ensureConnected(CallSession session) {
     if (connected.compareAndSet(false, true)) {
+      RealtimeSetup setup = null;
+      if (realtimeSetupCallback != null) {
+        setup = realtimeSetupCallback.getRealtimeSetup(null);
+      }
       callback.start(setup);
       bridge.connect(setup).exceptionally(ex -> {
         log.error("bridge connect failed, callId={}", callId, ex);

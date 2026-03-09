@@ -10,12 +10,12 @@ public final class RealtimeSetupFactory {
   }
 
   public static RealtimeSetup buildFromEnv() {
-    String systemPrompt = PromptEngine.renderToString("VOICE_AGENT_SYSTEM_PROMPT");
-    String userPrompt = PromptEngine.renderToString("VOICE_AGENT_USER_PROMPT");
-    String jobDescription = PromptEngine.renderToString("VOICE_AGENT_JOB_DESCRIPTION");
-    String resume = PromptEngine.renderToString("VOICE_AGENT_RESUME");
-    String questions = PromptEngine.renderToString("VOICE_AGENT_QUESTIONS");
-    String greeting = PromptEngine.renderToString("VOICE_AGENT_GREETING");
+    String systemPrompt = PromptEngine.renderToString("voice_agent_system_prompt.txt");
+    String userPrompt = PromptEngine.renderToString("voice_agent_user_prompt.txt");
+    String jobDescription = PromptEngine.renderToString("voice_agent_job_description.txt");
+    String resume = PromptEngine.renderToString("voice_agent_resume.txt");
+    String questions = PromptEngine.renderToString("voice_agent_questions.txt");
+    String greeting = PromptEngine.renderToString("voice_agent_greeting.txt");
 
     return new RealtimeSetup(systemPrompt, userPrompt, jobDescription, resume, questions, greeting);
   }
