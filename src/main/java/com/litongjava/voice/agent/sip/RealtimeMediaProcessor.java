@@ -62,7 +62,8 @@ public class RealtimeMediaProcessor implements MediaProcessor {
 
       short[] modelInputSamples = inputSamples;
       if (inputSampleRate != MODEL_INPUT_SAMPLE_RATE) {
-        modelInputSamples = AudioResampler.resample(inputSamples, inputSampleRate, MODEL_INPUT_SAMPLE_RATE);
+        AudioResampler resampler = session.getOrCreateInputResampler(inputSampleRate, MODEL_INPUT_SAMPLE_RATE);
+        modelInputSamples = resampler.resample(inputSamples);
       }
 
       byte[] pcm16kBytes = PcmCodec.shortsToLittleEndianBytes(modelInputSamples);
@@ -73,11 +74,10 @@ public class RealtimeMediaProcessor implements MediaProcessor {
         return null;
       }
 
-      return new AudioFrame(
-          outputSamples,
-          sessionSampleRate,
-          NegotiatedAudioFormatResolver.resolveChannels(session),
-          input.getRtpTimestamp());
+      int channels = NegotiatedAudioFormatResolver.resolveChannels(session);
+      long rtpTimestamp = input.getRtpTimestamp();
+      return new AudioFrame(outputSamples, sessionSampleRate, channels, rtpTimestamp);
+
     } catch (Exception e) {
       log.error("process failed, callId={}", callId, e);
       return null;

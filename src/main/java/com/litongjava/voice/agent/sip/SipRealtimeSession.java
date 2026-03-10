@@ -6,7 +6,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.litongjava.sip.model.CallSession;
 import com.litongjava.sip.rtp.codec.AudioResampler;
-import com.litongjava.sip.rtp.codec.NegotiatedAudioFormatResolver;
 import com.litongjava.sip.rtp.codec.PcmCodec;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridge;
 import com.litongjava.voice.agent.bridge.RealtimeSetup;
@@ -18,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 public class SipRealtimeSession {
 
   private static final int MODEL_OUTPUT_SAMPLE_RATE = 24000;
+  private static final int DEFAULT_SESSION_SAMPLE_RATE = 8000;
 
   private final String callId;
   private final RealtimeModelBridge bridge;
@@ -38,6 +38,7 @@ public class SipRealtimeSession {
 
   public void ensureConnected(CallSession session) {
     this.callSession = session;
+
     if (connected.compareAndSet(false, true)) {
       RealtimeSetup setup = null;
       if (realtimeSetupCallback != null) {
@@ -73,17 +74,31 @@ public class SipRealtimeSession {
       return;
     }
 
-    CallSession session = this.callSession;
-    int sessionSampleRate = NegotiatedAudioFormatResolver.resolveSessionPcmSampleRate(session);
+    int sessionSampleRate = resolveSessionSampleRate();
 
     short[] pcmSessionRate = pcm24k;
     if (MODEL_OUTPUT_SAMPLE_RATE != sessionSampleRate) {
-      pcmSessionRate = AudioResampler.resample(pcm24k, MODEL_OUTPUT_SAMPLE_RATE, sessionSampleRate);
+      AudioResampler resampler = callSession.getOrCreateOutputResampler(MODEL_OUTPUT_SAMPLE_RATE, sessionSampleRate);
+      pcmSessionRate = resampler.resample(pcm24k);
     }
 
     for (short sample : pcmSessionRate) {
       outputQueue.offer(sample);
     }
+  }
+
+
+  private int resolveSessionSampleRate() {
+    return resolveSessionSampleRate(this.callSession);
+  }
+
+  private int resolveSessionSampleRate(CallSession session) {
+    if (session == null) {
+      return DEFAULT_SESSION_SAMPLE_RATE;
+    }
+
+    int sampleRate = session.getPcmSampleRate();
+    return sampleRate > 0 ? sampleRate : DEFAULT_SESSION_SAMPLE_RATE;
   }
 
   public short[] takeOutputFrame(int frameSamples) {
