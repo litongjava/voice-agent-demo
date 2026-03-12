@@ -118,7 +118,10 @@ public class VoiceSocketHandler implements IWebSocketHandler {
 
         connectLLM(channelContext, platform, realtimeSetup);
         // 回显确认
-        String json = toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.SETUP_RECEIVED.name()));
+        String id = ChannelContextUtils.key(channelContext);
+        WsVoiceAgentResponseMessage wsVoiceAgentResponseMessage = new WsVoiceAgentResponseMessage(WsVoiceAgentType.SETUP_RECEIVED.name());
+        wsVoiceAgentResponseMessage.setSessionId(id);
+        String json = toJson(wsVoiceAgentResponseMessage);
         Tio.send(channelContext, WebSocketResponse.fromText(json, VoiceAgentConst.CHARSET));
         break;
       default:
