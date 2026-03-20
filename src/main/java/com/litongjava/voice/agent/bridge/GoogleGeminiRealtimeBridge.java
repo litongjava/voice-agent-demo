@@ -234,8 +234,8 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
   private LiveConnectConfig buildLiveConfig() {
     // 自动VAD配置：AutomaticActivityDetection/RealtimeInputConfig
     AutomaticActivityDetection vad = AutomaticActivityDetection.builder().disabled(false)
-        .startOfSpeechSensitivity(StartSensitivity.Known.START_SENSITIVITY_HIGH)
-        .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_LOW).prefixPaddingMs(100).silenceDurationMs(500)
+        .startOfSpeechSensitivity(StartSensitivity.Known.START_SENSITIVITY_LOW)
+        .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_LOW).prefixPaddingMs(100).silenceDurationMs(300)
         .build();
 
     RealtimeInputConfig realtimeInput = RealtimeInputConfig.builder().automaticActivityDetection(vad)
@@ -269,6 +269,13 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
       Optional<LiveServerContent> serverContentOpt = msg.serverContent();
       if (serverContentOpt.isPresent()) {
         LiveServerContent sc = serverContentOpt.get();
+
+        sc.interrupted().ifPresent(v -> {
+          if (v) {
+            log.info("interrupted");
+            send(new WsVoiceAgentResponseMessage("interrupted"));
+          }
+        });
 
         // 输入转写
         sc.inputTranscription().ifPresent(t -> {

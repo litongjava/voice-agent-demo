@@ -57,13 +57,7 @@ public class VaAdminConfig implements BootConfiguration {
     // 获取 HTTP 请求路由器
     HttpRequestRouter r = server.getRequestRouter();
     if (r != null) {
-      // 获取文件处理器，并添加文件上传和获取 URL 的接口
-      SystemFileTencentCosHandler systemUploadHandler = new SystemFileTencentCosHandler();
-      r.add("/api/system/file/upload", systemUploadHandler::upload);
-      r.add("/api/system/file/url", systemUploadHandler::getUrl);
-
       r.add("/api/v1/livekit/token", new LiveKitTokenHandler());
-
     }
 
     // 配置控制器
