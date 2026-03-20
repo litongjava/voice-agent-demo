@@ -234,8 +234,8 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
   private LiveConnectConfig buildLiveConfig() {
     // 自动VAD配置：AutomaticActivityDetection/RealtimeInputConfig
     AutomaticActivityDetection vad = AutomaticActivityDetection.builder().disabled(false)
-        .startOfSpeechSensitivity(StartSensitivity.Known.START_SENSITIVITY_LOW)
-        .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_LOW).prefixPaddingMs(100).silenceDurationMs(300)
+        .startOfSpeechSensitivity(StartSensitivity.Known.START_SENSITIVITY_HIGH)
+        .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_LOW).prefixPaddingMs(100).silenceDurationMs(500)
         .build();
 
     RealtimeInputConfig realtimeInput = RealtimeInputConfig.builder().automaticActivityDetection(vad)
