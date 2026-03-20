@@ -3,6 +3,7 @@ package com.litongjava.voice.agent.handler;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.litongjava.tio.consts.TioConst;
 import com.litongjava.tio.core.ChannelContext;
 import com.litongjava.tio.core.Tio;
 import com.litongjava.tio.http.common.HttpRequest;
@@ -13,12 +14,10 @@ import com.litongjava.tio.websocket.common.WebSocketResponse;
 import com.litongjava.tio.websocket.common.WebSocketSessionContext;
 import com.litongjava.tio.websocket.server.handler.IWebSocketHandler;
 import com.litongjava.voice.agent.audio.SessionAudioRecorder;
-import com.litongjava.voice.agent.bridge.RealtimeBridgeCallback;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridge;
 import com.litongjava.voice.agent.bridge.RealtimeModelBridgeFactory;
 import com.litongjava.voice.agent.bridge.RealtimeSetup;
 import com.litongjava.voice.agent.callback.WsRealtimeBridgeCallback;
-import com.litongjava.voice.agent.consts.VoiceAgentConst;
 import com.litongjava.voice.agent.model.WsVoiceAgentRequestMessage;
 import com.litongjava.voice.agent.model.WsVoiceAgentResponseMessage;
 import com.litongjava.voice.agent.model.WsVoiceAgentType;
@@ -28,8 +27,31 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class VoiceSocketHandler implements IWebSocketHandler {
-  // 一个前端连接一个 bridge
+
+  /**
+   * 一个前端连接一个 bridge
+   */
   private static final Map<String, RealtimeModelBridge> BRIDGES = new ConcurrentHashMap<>();
+
+  /**
+   * 一个前端连接一个 callback
+   */
+  private static final Map<String, WsRealtimeBridgeCallback> CALLBACKS = new ConcurrentHashMap<>();
+
+  /**
+   * 主动介入总开关
+   */
+  private static final boolean ENABLE_PROACTIVE_INTERVENTION = true;
+
+  /**
+   * assistant 完成回复后，用户沉默多久开始主动介入
+   */
+  private static final long PROACTIVE_INTERVENTION_TIMEOUT_MS = 8_000L;
+
+  /**
+   * 两次主动介入之间的最小间隔
+   */
+  private static final long PROACTIVE_INTERVENTION_REPEAT_MS = 8_000L;
 
   @Override
   public HttpResponse handshake(HttpRequest httpRequest, HttpResponse response, ChannelContext channelContext)
@@ -46,29 +68,38 @@ public class VoiceSocketHandler implements IWebSocketHandler {
 
   @Override
   public Object onClose(WebSocketRequest wsRequest, byte[] bytes, ChannelContext channelContext) throws Exception {
-    String k = ChannelContextUtils.key(channelContext);
-    RealtimeModelBridge bridge = BRIDGES.remove(k);
-    if (bridge != null) {
-      bridge.close();
-    }
-    Tio.remove(channelContext, "客户端主动关闭连接");
+    String sessionKey = ChannelContextUtils.key(channelContext);
+    cleanupSession(channelContext, sessionKey, "客户端主动关闭连接");
     return null;
   }
 
   @Override
   public Object onBytes(WebSocketRequest wsRequest, byte[] bytes, ChannelContext channelContext) throws Exception {
-    String k = ChannelContextUtils.key(channelContext);
-    // 前端推：16k PCM mono 裸流,记录用户上行音频（前端发来 16k PCM）
+    String sessionKey = ChannelContextUtils.key(channelContext);
+
+    // 这里只表示“麦克风流有数据”，不代表用户真的开口，所以只做轻量触达
+    WsRealtimeBridgeCallback callback = CALLBACKS.get(sessionKey);
+    if (callback != null) {
+      callback.onUserAudioActivity();
+    }
+
     try {
-      SessionAudioRecorder.appendUserPcm(k, bytes);
+      SessionAudioRecorder.appendUserPcm(sessionKey, bytes);
     } catch (Exception ex) {
       log.warn("appendUserPcm failed: {}", ex.getMessage());
     }
 
-    RealtimeModelBridge bridge = BRIDGES.get(ChannelContextUtils.key(channelContext));
+    RealtimeModelBridge bridge = BRIDGES.get(sessionKey);
     if (bridge != null) {
-      bridge.sendPcm16k(bytes);
+      try {
+        bridge.sendPcm16k(bytes);
+      } catch (Exception e) {
+        log.error("bridge.sendPcm16k error, sessionKey:{}", sessionKey, e);
+      }
+    } else {
+      log.warn("bridge not found when onBytes, sessionKey:{}", sessionKey);
     }
+
     return null;
   }
 
@@ -78,125 +109,187 @@ public class VoiceSocketHandler implements IWebSocketHandler {
     String path = wsSessionContext.getHandshakeRequest().getRequestLine().path;
     log.info("路径：{}，收到消息：{}", path, text);
 
-    String t = text == null ? "" : text.trim();
+    String rawText = text == null ? "" : text.trim();
 
-    // 先尝试解析为 JSON -> WsMessage
     WsVoiceAgentRequestMessage msg = null;
     try {
-      msg = JsonUtils.parse(t, WsVoiceAgentRequestMessage.class);
+      msg = JsonUtils.parse(rawText, WsVoiceAgentRequestMessage.class);
     } catch (Exception je) {
-      // 解析失败：降级为普通文本处理
-      log.debug("收到非 JSON 文本或无法解析为 WsMessage", je.getMessage());
+      log.debug("收到非 JSON 文本或无法解析为 WsMessage: {}", je.getMessage());
       return null;
     } catch (Throwable e) {
       log.error("解析收到的消息异常", e);
       return null;
     }
-    RealtimeModelBridge bridge = BRIDGES.get(ChannelContextUtils.key(channelContext));
+
+    String sessionKey = ChannelContextUtils.key(channelContext);
+    RealtimeModelBridge bridge = BRIDGES.get(sessionKey);
 
     if (bridge == null && msg != null && msg.getType() != null) {
-      String typeStr = msg.getType().trim().toUpperCase();
-      WsVoiceAgentType typeEnum = null;
-      try {
-        typeEnum = WsVoiceAgentType.valueOf(typeStr);
-      } catch (Exception ex) {
-        // 未识别的 type，降级处理
-        log.debug("未知的 type: {}", typeStr);
-      }
-      switch (typeEnum) {
-      case SETUP:
+      WsVoiceAgentType typeEnum = parseType(msg.getType());
+
+      if (typeEnum == WsVoiceAgentType.SETUP) {
         String platform = msg.getPlatform();
         String systemPrompt = msg.getSystem_prompt();
-        String user_prompt = msg.getUser_prompt();
-        String job_description = msg.getJob_description();
+        String userPrompt = msg.getUser_prompt();
+        String jobDescription = msg.getJob_description();
         String resume = msg.getResume();
         String questions = msg.getQuestions();
         String greeting = msg.getGreeting();
 
-        RealtimeSetup realtimeSetup = new RealtimeSetup(systemPrompt, user_prompt, job_description, resume, questions,
+        RealtimeSetup realtimeSetup = new RealtimeSetup(systemPrompt, userPrompt, jobDescription, resume, questions,
             greeting);
 
         connectLLM(channelContext, platform, realtimeSetup);
-        // 回显确认
-        String id = ChannelContextUtils.key(channelContext);
-        WsVoiceAgentResponseMessage wsVoiceAgentResponseMessage = new WsVoiceAgentResponseMessage(WsVoiceAgentType.SETUP_RECEIVED.name());
-        wsVoiceAgentResponseMessage.setSessionId(id);
-        String json = toJson(wsVoiceAgentResponseMessage);
-        Tio.send(channelContext, WebSocketResponse.fromText(json, VoiceAgentConst.CHARSET));
-        break;
-      default:
-        break;
+
+        WsVoiceAgentResponseMessage resp = new WsVoiceAgentResponseMessage(WsVoiceAgentType.SETUP_RECEIVED.name());
+        resp.setSessionId(sessionKey);
+
+        String json = toJson(resp);
+        Tio.send(channelContext, WebSocketResponse.fromText(json, TioConst.UTF_8));
+      } else {
+        log.warn("bridge not ready and first message is not SETUP, sessionKey:{}, type:{}", sessionKey, msg.getType());
       }
+
       return null;
     }
 
     if (bridge == null) {
       String respJson = toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.ERROR.name(), "no bridge"));
-      Tio.send(channelContext, WebSocketResponse.fromText(respJson, VoiceAgentConst.CHARSET));
+      Tio.send(channelContext, WebSocketResponse.fromText(respJson, TioConst.UTF_8));
       return null;
     }
 
     try {
       if (msg != null && msg.getType() != null) {
-        String typeStr = msg.getType().trim().toUpperCase();
-        WsVoiceAgentType typeEnum = null;
-        try {
-          typeEnum = WsVoiceAgentType.valueOf(typeStr);
-        } catch (Exception ex) {
-          // 未识别的 type，降级处理
-          log.debug("未知的 type: {}", typeStr);
-        }
+        WsVoiceAgentType typeEnum = parseType(msg.getType());
 
         if (typeEnum != null) {
           switch (typeEnum) {
-          case AUDIO_END:
+          case AUDIO_END: {
             bridge.endAudioInput();
             break;
+          }
 
-          case TEXT:
+          case TEXT: {
             String userText = msg.getText() == null ? "" : msg.getText();
+
+            WsRealtimeBridgeCallback callback = CALLBACKS.get(sessionKey);
+            if (callback != null) {
+              callback.onUserTextActivity(userText);
+            }
+
             bridge.sendText(userText);
             break;
+          }
 
-          case CLOSE:
-            bridge.close();
-            Tio.remove(channelContext, "client requested close");
-            break;
-
-          default:
-            // 其它类型：回显原始 JSON
-            Tio.send(channelContext, WebSocketResponse.fromText(
-                toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.IGNORED.name(), t)), VoiceAgentConst.CHARSET));
+          case CLOSE: {
+            cleanupSession(channelContext, sessionKey, "client requested close");
             break;
           }
+
+          default: {
+            Tio.send(channelContext,
+                WebSocketResponse.fromText(
+                    toJson(new WsVoiceAgentResponseMessage(WsVoiceAgentType.IGNORED.name(), rawText)),
+                    TioConst.UTF_8));
+            break;
+          }
+          }
+        } else {
+          log.debug("未知的 type: {}", msg.getType());
         }
       }
     } catch (Exception e) {
-      log.error(e.getMessage(), e);
+      log.error("onText handle error, sessionKey:{}", sessionKey, e);
     }
+
     return null;
+  }
+
+  private void connectLLM(ChannelContext channelContext, String platform, RealtimeSetup setup) {
+    String sessionKey = ChannelContextUtils.key(channelContext);
+
+    WsRealtimeBridgeCallback callback = new WsRealtimeBridgeCallback(channelContext);
+    callback.configureProactiveIntervention(ENABLE_PROACTIVE_INTERVENTION, PROACTIVE_INTERVENTION_TIMEOUT_MS,
+        PROACTIVE_INTERVENTION_REPEAT_MS);
+
+    try {
+      SessionAudioRecorder.start(sessionKey, 16000, 24000);
+    } catch (Exception e) {
+      log.warn("start recorder failed: {}", e.getMessage());
+    }
+
+    RealtimeModelBridge bridge = RealtimeModelBridgeFactory.createBridge(platform, callback);
+
+    callback.bindModelTextSender(prompt -> {
+      try {
+        RealtimeModelBridge b = BRIDGES.get(sessionKey);
+        if (b != null) {
+          b.sendText(prompt);
+        } else {
+          log.warn("bridge not found when proactive intervention, sessionKey:{}", sessionKey);
+        }
+      } catch (Exception e) {
+        log.warn("bridge.sendText failed, sessionKey:{}, prompt:{}", sessionKey, prompt, e);
+      }
+    });
+
+    callback.start(setup);
+
+    CALLBACKS.put(sessionKey, callback);
+    BRIDGES.put(sessionKey, bridge);
+
+    try {
+      bridge.connect(setup);
+    } catch (Exception e) {
+      log.error("bridge.connect error, sessionKey:{}", sessionKey, e);
+      cleanupSession(channelContext, sessionKey, "bridge connect failed");
+    }
+  }
+
+  private void cleanupSession(ChannelContext channelContext, String sessionKey, String reason) {
+    WsRealtimeBridgeCallback callback = CALLBACKS.remove(sessionKey);
+    RealtimeModelBridge bridge = BRIDGES.remove(sessionKey);
+
+    if (bridge != null) {
+      try {
+        bridge.close();
+      } catch (Exception e) {
+        log.warn("bridge.close error, sessionKey:{}", sessionKey, e);
+      }
+      return;
+    }
+
+    if (callback != null) {
+      try {
+        callback.close(reason);
+      } catch (Exception e) {
+        log.warn("callback.close error, sessionKey:{}", sessionKey, e);
+      }
+      return;
+    }
+
+    try {
+      Tio.remove(channelContext, reason);
+    } catch (Exception e) {
+      log.warn("Tio.remove error, sessionKey:{}", sessionKey, e);
+    }
+  }
+
+  private WsVoiceAgentType parseType(String type) {
+    if (type == null) {
+      return null;
+    }
+
+    try {
+      return WsVoiceAgentType.valueOf(type.trim().toUpperCase());
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   private String toJson(WsVoiceAgentResponseMessage wsVoiceAgentResponseMessage) {
     return JsonUtils.toSkipNullJson(wsVoiceAgentResponseMessage);
   }
-
-  private void connectLLM(ChannelContext channelContext, String platform, RealtimeSetup setup) {
-    String k = ChannelContextUtils.key(channelContext);
-
-    // 启动 recorder（用户是 16k，模型默认 24k）
-    try {
-      SessionAudioRecorder.start(k, 16000, 24000);
-    } catch (Exception e) {
-      log.warn("start recorder failed: {}", e.getMessage());
-    }
-
-    RealtimeBridgeCallback callback = new WsRealtimeBridgeCallback(channelContext);
-    callback.start(setup);
-    RealtimeModelBridge bridge = RealtimeModelBridgeFactory.createBridge(platform, callback);
-    BRIDGES.put(k, bridge);
-    // 连接 Gemini Live（异步）
-    bridge.connect(setup);
-  }
-
 }
