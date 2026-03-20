@@ -1,108 +1,74 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Voice Agent (WS)</title>
-    <style>
-        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
-        .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-        button { padding: 10px 14px; cursor: pointer; }
-        input, select, textarea { padding: 10px; min-width: 280px; }
-        .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-top: 14px; }
-        .muted { color: #666; font-size: 12px; }
-        pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 12px; border-radius: 8px; }
-        .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-        @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
-        .col { display:flex; flex-direction:column; gap:8px; }
-        label.small { font-size: 13px; color:#333; }
+class MicProcessor extends AudioWorkletProcessor {
+	constructor() {
+		super();
+		this._srcRate = sampleRate; // AudioContext 的采样率
+		this._dstRate = 16000;
+		this._ratio = this._srcRate / this._dstRate;
 
-        .session-box {
-            margin-top: 10px;
-            padding: 12px;
-            background: #f7f7f7;
-            border-radius: 8px;
-            word-break: break-all;
-        }
-        .session-label {
-            font-size: 13px;
-            color: #666;
-            margin-bottom: 6px;
-        }
-        .session-value {
-            font-size: 16px;
-            font-weight: 600;
-            color: #222;
-            transition: color 0.2s ease, opacity 0.2s ease;
-        }
-        .session-value.disconnected {
-            color: #999;
-            opacity: 0.9;
-        }
-    </style>
-</head>
-<body>
-<h2>Voice Agent 前端 (纯静态)</h2>
+		this._buffer = new Float32Array(0);
+		this._enabled = false;
 
-<div class="card">
-    <div class="row">
-        <label>WS 地址：</label>
-        <input id="wsUrl" />
-        <button id="btnConnect">连接</button>
-        <button id="btnDisconnect" disabled>断开</button>
-    </div>
-    <div class="muted">
-        默认会用当前站点推导：ws(s)://{host}/api/v1/voice/agent
-    </div>
+		this.port.onmessage = (e) => {
+			const msg = e.data || {};
+			if (msg.type === "enable") this._enabled = true;
+			if (msg.type === "disable") this._enabled = false;
+		};
+	}
 
-    <div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap;">
-        <div class="col" style="flex:1; min-width:240px;">
-            <label class="small">系统提示词（system prompt）</label>
-            <textarea id="systemPrompt" rows="3" placeholder="在此输入系统提示词，例如：你是一个友好的语音助手，始终简洁回答。"></textarea>
-        </div>
-        <div class="col" style="flex:1; min-width:240px;">
-            <label class="small">用户提示词（user prompt）</label>
-            <textarea id="userPrompt" rows="3" placeholder="在此输入给模型的用户提示词（可选）"></textarea>
-        </div>
-    </div>
-</div>
+	_concat(a, b) {
+		const out = new Float32Array(a.length + b.length);
+		out.set(a, 0);
+		out.set(b, a.length);
+		return out;
+	}
 
-<div class="card">
-    <strong>Session 信息</strong>
-    <div class="session-box">
-        <div class="session-label">当前 sessionId</div>
-        <div id="sessionId" class="session-value disconnected">-</div>
-    </div>
-</div>
+	// 简单线性重采样到 16k
+	_resampleTo16k(input) {
+		const inLen = input.length;
+		if (inLen === 0) return new Float32Array(0);
 
-<div class="card">
-    <div class="row">
-        <button id="btnStartMic" disabled>开始说话</button>
-        <button id="btnStopMic" disabled>停止说话</button>
-        <button id="btnAudioEnd" disabled>发送 audio_end</button>
-        <label class="muted">输入：16k PCM / 输出：24k PCM</label>
-    </div>
-    <div class="row" style="margin-top: 10px;">
-        <input id="textInput" placeholder="输入文字发送给模型（可选）" />
-        <button id="btnSendText" disabled>发送文本</button>
-    </div>
-</div>
+		// 目标长度
+		const outLen = Math.floor(inLen / this._ratio);
+		const out = new Float32Array(outLen);
 
-<div class="grid">
-    <div class="card">
-        <div class="row">
-            <strong>转写/事件</strong>
-            <button id="btnClearLog">清空</button>
-        </div>
-        <pre id="log"></pre>
-    </div>
+		for (let i = 0; i < outLen; i++) {
+			const t = i * this._ratio;
+			const i0 = Math.floor(t);
+			const i1 = Math.min(i0 + 1, inLen - 1);
+			const frac = t - i0;
+			out[i] = input[i0] * (1 - frac) + input[i1] * frac;
+		}
+		return out;
+	}
 
-    <div class="card">
-        <strong>播放状态</strong>
-        <pre id="playState"></pre>
-    </div>
-</div>
+	process(inputs) {
+		if (!this._enabled) return true;
 
-<script src="./app.js"></script>
-</body>
-</html>
+		const input = inputs[0];
+		if (!input || !input[0]) return true;
+
+		// 只取单声道
+		const chan0 = input[0];
+
+		// 拼接到内部缓冲，避免每帧太短
+		this._buffer = this._concat(this._buffer, chan0);
+
+		// 每次至少攒够 ~40ms 再下发（16k * 0.04 = 640 samples）
+		// 这里用源采样率对应长度
+		const minSrc = Math.floor(this._srcRate * 0.04);
+		if (this._buffer.length < minSrc) return true;
+
+		const chunk = this._buffer;
+		this._buffer = new Float32Array(0);
+
+		const resampled = this._resampleTo16k(chunk);
+		this.port.postMessage({
+			type: "pcm_f32_16k",
+			data: resampled
+		}, [resampled.buffer]);
+
+		return true;
+	}
+}
+
+registerProcessor("mic-processor", MicProcessor);

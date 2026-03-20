@@ -1,108 +1,181 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Voice Agent (WS)</title>
-    <style>
-        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
-        .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-        button { padding: 10px 14px; cursor: pointer; }
-        input, select, textarea { padding: 10px; min-width: 280px; }
-        .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-top: 14px; }
-        .muted { color: #666; font-size: 12px; }
-        pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 12px; border-radius: 8px; }
-        .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-        @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
-        .col { display:flex; flex-direction:column; gap:8px; }
-        label.small { font-size: 13px; color:#333; }
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width,initial-scale=1" />
+		<title>Voice Agent (WS)</title>
+		<style>
+			body {
+				font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+				margin: 24px;
+			}
 
-        .session-box {
-            margin-top: 10px;
-            padding: 12px;
-            background: #f7f7f7;
-            border-radius: 8px;
-            word-break: break-all;
-        }
-        .session-label {
-            font-size: 13px;
-            color: #666;
-            margin-bottom: 6px;
-        }
-        .session-value {
-            font-size: 16px;
-            font-weight: 600;
-            color: #222;
-            transition: color 0.2s ease, opacity 0.2s ease;
-        }
-        .session-value.disconnected {
-            color: #999;
-            opacity: 0.9;
-        }
-    </style>
-</head>
-<body>
-<h2>Voice Agent 前端 (纯静态)</h2>
+			.row {
+				display: flex;
+				gap: 12px;
+				flex-wrap: wrap;
+				align-items: center;
+			}
 
-<div class="card">
-    <div class="row">
-        <label>WS 地址：</label>
-        <input id="wsUrl" />
-        <button id="btnConnect">连接</button>
-        <button id="btnDisconnect" disabled>断开</button>
-    </div>
-    <div class="muted">
-        默认会用当前站点推导：ws(s)://{host}/api/v1/voice/agent
-    </div>
+			button {
+				padding: 10px 14px;
+				cursor: pointer;
+			}
 
-    <div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap;">
-        <div class="col" style="flex:1; min-width:240px;">
-            <label class="small">系统提示词（system prompt）</label>
-            <textarea id="systemPrompt" rows="3" placeholder="在此输入系统提示词，例如：你是一个友好的语音助手，始终简洁回答。"></textarea>
-        </div>
-        <div class="col" style="flex:1; min-width:240px;">
-            <label class="small">用户提示词（user prompt）</label>
-            <textarea id="userPrompt" rows="3" placeholder="在此输入给模型的用户提示词（可选）"></textarea>
-        </div>
-    </div>
-</div>
+			input,
+			select,
+			textarea {
+				padding: 10px;
+				min-width: 280px;
+			}
 
-<div class="card">
-    <strong>Session 信息</strong>
-    <div class="session-box">
-        <div class="session-label">当前 sessionId</div>
-        <div id="sessionId" class="session-value disconnected">-</div>
-    </div>
-</div>
+			.card {
+				border: 1px solid #ddd;
+				border-radius: 10px;
+				padding: 14px;
+				margin-top: 14px;
+			}
 
-<div class="card">
-    <div class="row">
-        <button id="btnStartMic" disabled>开始说话</button>
-        <button id="btnStopMic" disabled>停止说话</button>
-        <button id="btnAudioEnd" disabled>发送 audio_end</button>
-        <label class="muted">输入：16k PCM / 输出：24k PCM</label>
-    </div>
-    <div class="row" style="margin-top: 10px;">
-        <input id="textInput" placeholder="输入文字发送给模型（可选）" />
-        <button id="btnSendText" disabled>发送文本</button>
-    </div>
-</div>
+			.muted {
+				color: #666;
+				font-size: 12px;
+			}
 
-<div class="grid">
-    <div class="card">
-        <div class="row">
-            <strong>转写/事件</strong>
-            <button id="btnClearLog">清空</button>
-        </div>
-        <pre id="log"></pre>
-    </div>
+			pre {
+				white-space: pre-wrap;
+				word-break: break-word;
+				background: #f7f7f7;
+				padding: 12px;
+				border-radius: 8px;
+			}
 
-    <div class="card">
-        <strong>播放状态</strong>
-        <pre id="playState"></pre>
-    </div>
-</div>
+			.grid {
+				display: grid;
+				grid-template-columns: 1fr;
+				gap: 12px;
+			}
 
-<script src="./app.js"></script>
-</body>
+			@media (min-width: 900px) {
+				.grid {
+					grid-template-columns: 1fr 1fr;
+				}
+			}
+
+			.col {
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+			}
+
+			label.small {
+				font-size: 13px;
+				color: #333;
+			}
+
+			.session-box {
+				margin-top: 10px;
+				padding: 12px;
+				background: #f7f7f7;
+				border-radius: 8px;
+				word-break: break-all;
+			}
+
+			.session-label {
+				font-size: 13px;
+				color: #666;
+				margin-bottom: 6px;
+			}
+
+			.session-value {
+				font-size: 16px;
+				font-weight: 600;
+				color: #222;
+				transition: color 0.2s ease, opacity 0.2s ease;
+			}
+
+			.session-value.disconnected {
+				color: #999;
+				opacity: 0.9;
+			}
+		</style>
+	</head>
+	<body>
+		<h2>Voice Agent 前端 (纯静态)</h2>
+
+		<div class="card">
+			<div class="row">
+				<label>WS 地址：</label>
+				<input id="wsUrl" />
+				<button id="btnConnect">连接</button>
+				<button id="btnDisconnect" disabled>断开</button>
+			</div>
+			<div class="muted">
+				默认会用当前站点推导：ws(s)://{host}/api/v1/voice/agent
+			</div>
+
+			<!-- 系统提示词 与 新增的上下文字段 -->
+			<div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap;">
+				<div class="col" style="flex:1; min-width:240px;">
+					<label class="small">系统提示词（system prompt）</label>
+					<textarea id="systemPrompt" rows="3" placeholder="在此输入系统提示词，例如：你是一个友好的语音助手，始终简洁回答。"></textarea>
+				</div>
+
+				<div class="col" style="flex:1; min-width:240px;">
+					<label class="small">求职描述（job_description）</label>
+					<textarea id="jobDescription" rows="3" placeholder="职位、岗位描述或期望工作内容"></textarea>
+				</div>
+
+				<div class="col" style="flex:1; min-width:240px;">
+					<label class="small">简历（resume）</label>
+					<textarea id="resume" rows="3" placeholder="候选人的简历或简介（可粘贴文本）"></textarea>
+				</div>
+
+				<div class="col" style="flex:1; min-width:240px;">
+					<label class="small">问题集（questions）</label>
+					<textarea id="questions" rows="3" placeholder="要让模型使用的面试问题或交互问题（多条可换行）"></textarea>
+				</div>
+
+				<div class="col" style="flex:1; min-width:240px;">
+					<label class="small">问候语（greeting）</label>
+					<textarea id="greeting" rows="2" placeholder="连接后或对话开始时模型应使用的简短问候"></textarea>
+				</div>
+			</div>
+		</div>
+		<div class="card">
+			<strong>Session 信息</strong>
+			<div class="session-box">
+				<div class="session-label">当前 sessionId</div>
+				<div id="sessionId" class="session-value disconnected">-</div>
+			</div>
+		</div>
+		<div class="card">
+			<div class="row">
+				<button id="btnStartMic" disabled>开始说话</button>
+				<button id="btnStopMic" disabled>停止说话</button>
+				<button id="btnAudioEnd" disabled>发送 audio_end</button>
+				<label class="muted">输入：16k PCM / 输出：24k PCM</label>
+			</div>
+			<div class="row" style="margin-top: 10px;">
+				<input id="textInput" placeholder="输入文字发送给模型（可选）" />
+				<button id="btnSendText" disabled>发送文本</button>
+			</div>
+		</div>
+
+		<div class="grid">
+			<div class="card">
+				<div class="row">
+					<strong>转写/事件</strong>
+					<button id="btnClearLog">清空</button>
+				</div>
+				<pre id="log"></pre>
+			</div>
+
+			<div class="card">
+				<strong>播放状态</strong>
+				<pre id="playState"></pre>
+			</div>
+		</div>
+
+		<script src="./app.js"></script>
+	</body>
 </html>
