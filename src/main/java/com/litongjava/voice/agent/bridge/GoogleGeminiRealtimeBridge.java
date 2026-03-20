@@ -2,9 +2,9 @@ package com.litongjava.voice.agent.bridge;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import com.google.genai.AsyncSession;
@@ -32,7 +32,6 @@ import com.google.genai.types.TurnCoverage;
 import com.google.genai.types.VoiceConfig;
 import com.litongjava.gemini.GeminiClient;
 import com.litongjava.tio.utils.hutool.StrUtil;
-import com.litongjava.tio.utils.json.JsonUtils;
 import com.litongjava.voice.agent.model.WsVoiceAgentResponseMessage;
 
 import lombok.extern.slf4j.Slf4j;
@@ -40,9 +39,8 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
 
-  // 输入输出音频 mime
   private static final String INPUT_MIME = "audio/pcm;rate=16000";
-  private static final String OUTPUT_MIME_PREFIX = "audio/pcm"; // 输出是 audio/pcm（24k）
+  private static final String OUTPUT_MIME_PREFIX = "audio/pcm";
 
   private String model = "models/gemini-2.5-flash-native-audio-preview-12-2025";
   private String voiceName = "Puck";
@@ -50,6 +48,13 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
   private final Object transcriptLock = new Object();
   private final StringBuilder turnUserTranscript = new StringBuilder();
   private final StringBuilder turnAssistantTranscript = new StringBuilder();
+
+  /**
+   * 协议级 turn 控制
+   */
+  private final Object assistantTurnLock = new Object();
+  private volatile String currentAssistantTurnId;
+  private volatile boolean assistantTurnOpen = false;
 
   private final Client client;
   private volatile AsyncSession session;
@@ -59,12 +64,11 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
     this.callback = sender;
 
     Client.Builder b = Client.builder().apiKey(GeminiClient.GEMINI_API_KEY);
-
     ClientOptions clientOptions = ClientOptions.builder().build();
-
     b.clientOptions(clientOptions);
 
     this.client = b.build();
+
     if (model != null) {
       this.model = model;
     }
@@ -77,42 +81,43 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
     this(sender, null, null, null);
   }
 
+  @Override
   public CompletableFuture<Void> connect(RealtimeSetup realtimeSetup) {
     LiveConnectConfig config = buildLiveConfig();
 
-    // AsyncLive.connect(model, config) -> CompletableFuture<AsyncSession>
     return client.async.live.connect(model, config).thenCompose(sess -> {
       this.session = sess;
       String sessionId = sess.sessionId();
+
       callback.session(sessionId);
       send(new WsVoiceAgentResponseMessage("gemini_connected", sessionId));
 
-      // 如果连接建立时已存在 prompts（可能前端先发 setup），立即发送到模型
       try {
         sendPromptsIfAny(sess, realtimeSetup);
       } catch (Exception ex) {
-        log.error("send setup prompts error (connect)", ex);
+        log.error("send setup prompts error(connect)", ex);
         send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
       }
 
-      // 注册 receive 回调（只注册一次）
       CompletableFuture<Void> receiveFuture = sess.receive(this::onGeminiMessage);
       receiveFuture.whenComplete((v, ex) -> {
-        log.info("v:{},ex:{}", v, ex);
+        log.info("gemini receive completed, v:{}, ex:{}", v, ex);
         if (ex != null) {
-
+          log.error("gemini receive error", ex);
+          send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
         }
       });
+
       return receiveFuture;
     }).exceptionally(ex -> {
       log.error("Gemini live connect failed", ex);
-      String safe = safe(ex.getMessage());
-      send(new WsVoiceAgentResponseMessage("error", safe));
+      send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
       callback.close("gemini connect failed");
       return null;
     });
   }
 
+  @Override
   public CompletableFuture<Void> close() {
     try {
       AsyncSession s = this.session;
@@ -120,8 +125,12 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
         return s.close().exceptionally(ex -> null);
       }
     } finally {
+      closeAssistantTurnSilently();
       try {
         client.close();
+      } catch (Exception ignore) {
+      }
+      try {
         callback.close("close");
       } catch (Exception ignore) {
       }
@@ -129,11 +138,15 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
     return CompletableFuture.completedFuture(null);
   }
 
-  /** 前端推来的 16k PCM 裸流 */
+  /**
+   * 前端推来的 16k PCM 裸流
+   */
+  @Override
   public CompletableFuture<Void> sendPcm16k(byte[] pcm16k) {
     AsyncSession s = this.session;
-    if (s == null)
+    if (s == null) {
       return CompletableFuture.completedFuture(null);
+    }
 
     Blob audioBlob = Blob.builder().mimeType(INPUT_MIME).data(pcm16k).build();
 
@@ -141,7 +154,7 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
 
     return s.sendRealtimeInput(params).exceptionally(ex -> {
       String message = ex.getMessage();
-      log.error(message);
+      log.error("sendPcm16k error: {}", message, ex);
       send(new WsVoiceAgentResponseMessage("error", safe(message)));
       if ("org.java_websocket.exceptions.WebsocketNotConnectedException".equals(message)) {
         close();
@@ -150,27 +163,10 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
     });
   }
 
-  /** 前端说“音频结束”（可选，用于提示流结束） */
-  public CompletableFuture<Void> sendAudioStreamEnd() {
-    AsyncSession s = this.session;
-    if (s == null) {
-      return CompletableFuture.completedFuture(null);
-    }
-
-    LiveSendRealtimeInputParameters params = LiveSendRealtimeInputParameters.builder().audioStreamEnd(true).build();
-
-    return s.sendRealtimeInput(params).exceptionally(ex -> {
-      String message = ex.getMessage();
-      log.error(message);
-      send(new WsVoiceAgentResponseMessage("error", safe(message)));
-      if ("org.java_websocket.exceptions.WebsocketNotConnectedException".equals(message)) {
-        close();
-      }
-      return null;
-    });
-  }
-
-  /** 前端发文本输入（可选） */
+  /**
+   * 前端发文本输入
+   */
+  @Override
   public CompletableFuture<Void> sendText(String text) {
     AsyncSession s = this.session;
     if (s == null) {
@@ -183,7 +179,7 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
         .turnComplete(true).build();
 
     return s.sendClientContent(cc).exceptionally(ex -> {
-      log.error(ex.getMessage());
+      log.error("sendText error: {}", ex.getMessage(), ex);
       send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
       return null;
     });
@@ -193,36 +189,35 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
     if (realtimeSetup == null) {
       return;
     }
+
     String systemPrompt = realtimeSetup.getSystem_prompt();
-    String job_description = realtimeSetup.getJob_description();
+    String jobDescription = realtimeSetup.getJob_description();
     String resume = realtimeSetup.getResume();
     String questions = realtimeSetup.getQuestions();
     String greeting = realtimeSetup.getGreeting();
 
     List<Content> initialTurns = new ArrayList<>();
+
     if (StrUtil.notBlank(systemPrompt)) {
       initialTurns.add(Content.fromParts(Part.fromText(systemPrompt)));
     }
-
-    if (StrUtil.notBlank(job_description)) {
-      initialTurns.add(Content.fromParts(Part.fromText(job_description)));
+    if (StrUtil.notBlank(jobDescription)) {
+      initialTurns.add(Content.fromParts(Part.fromText(jobDescription)));
     }
-
     if (StrUtil.notBlank(resume)) {
       initialTurns.add(Content.fromParts(Part.fromText(resume)));
     }
-
     if (StrUtil.notBlank(questions) || StrUtil.notBlank(greeting)) {
-      initialTurns.add(Content.fromParts(Part.fromText(greeting + "\n\n" + questions)));
+      initialTurns.add(Content.fromParts(
+          Part.fromText((greeting == null ? "" : greeting) + "\n\n" + (questions == null ? "" : questions))));
     }
 
     if (!initialTurns.isEmpty()) {
-      // 初始化指令通常作为 context 而非单次完成的用户 turn，你可按需调整 turnComplete
       LiveSendClientContentParameters cc = LiveSendClientContentParameters.builder().turns(initialTurns)
           .turnComplete(true).build();
 
       s.sendClientContent(cc).exceptionally(ex -> {
-        log.error(ex.getMessage());
+        log.error("sendPromptsIfAny error: {}", ex.getMessage(), ex);
         send(new WsVoiceAgentResponseMessage("error", safe(ex.getMessage())));
         return null;
       });
@@ -232,10 +227,13 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
   }
 
   private LiveConnectConfig buildLiveConfig() {
-    // 自动VAD配置：AutomaticActivityDetection/RealtimeInputConfig
     AutomaticActivityDetection vad = AutomaticActivityDetection.builder().disabled(false)
         .startOfSpeechSensitivity(StartSensitivity.Known.START_SENSITIVITY_HIGH)
-        .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_LOW).prefixPaddingMs(100).silenceDurationMs(500)
+        //
+        .endOfSpeechSensitivity(EndSensitivity.Known.END_SENSITIVITY_HIGH)
+        //
+        .prefixPaddingMs(20).silenceDurationMs(150)
+        //
         .build();
 
     RealtimeInputConfig realtimeInput = RealtimeInputConfig.builder().automaticActivityDetection(vad)
@@ -243,115 +241,55 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
         .turnCoverage(TurnCoverage.Known.TURN_INCLUDES_ONLY_ACTIVITY).build();
 
     PrebuiltVoiceConfig prebuiltVoiceConfig = PrebuiltVoiceConfig.builder().voiceName(voiceName).build();
+
     VoiceConfig voiceConfig = VoiceConfig.builder().prebuiltVoiceConfig(prebuiltVoiceConfig).build();
+
     SpeechConfig speech = SpeechConfig.builder().voiceConfig(voiceConfig).build();
 
     ThinkingConfig thinkingConfig = ThinkingConfig.builder().thinkingBudget(0).build();
-    AudioTranscriptionConfig inputAudioTranscription = AudioTranscriptionConfig.builder().build();
-    LiveConnectConfig liveConnectConfig = LiveConnectConfig.builder()
-        .responseModalities(List.of(new Modality(Modality.Known.AUDIO)))
-        //
-        .speechConfig(speech).thinkingConfig(thinkingConfig).realtimeInputConfig(realtimeInput)
-        // 可选：转写
-        .inputAudioTranscription(inputAudioTranscription).outputAudioTranscription(inputAudioTranscription)
-        //
-        .build();
 
-    return liveConnectConfig;
+    AudioTranscriptionConfig audioTranscriptionConfig = AudioTranscriptionConfig.builder().build();
+
+    return LiveConnectConfig.builder().responseModalities(List.of(new Modality(Modality.Known.AUDIO)))
+        .speechConfig(speech).thinkingConfig(thinkingConfig).realtimeInputConfig(realtimeInput)
+        .inputAudioTranscription(audioTranscriptionConfig).outputAudioTranscription(audioTranscriptionConfig).build();
   }
 
+  /**
+   * Gemini -> 前端
+   */
   private void onGeminiMessage(LiveServerMessage msg) {
     try {
-      if (msg.setupComplete().isPresent()) {
-        send(new WsVoiceAgentResponseMessage("setup_complete"));
+      if (msg == null) {
+        return;
       }
 
-      Optional<LiveServerContent> serverContentOpt = msg.serverContent();
-      if (serverContentOpt.isPresent()) {
-        LiveServerContent sc = serverContentOpt.get();
+      msg.serverContent().ifPresent(this::handleServerContent);
 
-        sc.interrupted().ifPresent(v -> {
-          if (v) {
-            log.info("interrupted");
-            send(new WsVoiceAgentResponseMessage("interrupted"));
-          }
-        });
-
-        // 输入转写
-        sc.inputTranscription().ifPresent(t -> {
-          Optional<String> optional = t.text();
-          String text = optional.orElse(null);
-          send(new WsVoiceAgentResponseMessage("transcript_in", text));
-          appendTurnTranscript("user", text);
-        });
-
-        // 输出转写
-        sc.outputTranscription().ifPresent(t -> {
-          Optional<String> optional = t.text();
-          String text = optional.orElse(null);
-          send(new WsVoiceAgentResponseMessage("transcript_out", text));
-          appendTurnTranscript("model", text);
-        });
-
-        // 模型输出（音频/文本 part）
-        sc.modelTurn().ifPresent(content -> {
-          content.parts().ifPresent(parts -> {
-            for (Part p : parts) {
-              // 文本
-              p.text().ifPresent(txt -> send(new WsVoiceAgentResponseMessage("text", txt)));
-
-              // 音频（inlineData）
-              p.inlineData().ifPresent(blob -> {
-                String mt = blob.mimeType().orElse("");
-                byte[] data = blob.data().orElse(null);
-                if (data != null && mt.startsWith(OUTPUT_MIME_PREFIX)) {
-                  // 直接二进制回传（建议前端按 24k PCM 播放）
-                  callback.sendBinary(data);
-                } else if (data != null) {
-                  // 兜底：非音频inlineData，走base64文本
-                  String b64 = Base64.getEncoder().encodeToString(data);
-                  WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("inline_data");
-                  m.setText(b64);
-                  send(m);
-                }
-              });
-
-              // functionCall 等你后续再扩展
-              p.functionCall().ifPresent(fc -> {
-                WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("function_call");
-                m.setText(fc.name().orElse(""));
-                send(m);
-              });
-            }
-          });
-        });
-
-        // turnComplete
-        if (sc.turnComplete().orElse(false)) {
-          send(new WsVoiceAgentResponseMessage("turn_complete"));
-          flushTurnTranscriptOnComplete();
-        }
-      }
-
-      // goAway（服务端提示将断开）
-      msg.goAway().ifPresent(g -> {
-        String timeLeft = g.timeLeft().map(Duration::toString) // 例如 PT30S / PT1M
-            .orElse("");
-        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("go_away");
-        m.setText(timeLeft);
+      msg.usageMetadata().ifPresent(usage -> {
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("usage");
+        m.setPromptTokenCount(usage.promptTokenCount());
+        m.setResponseTokenCount(usage.responseTokenCount());
+        m.setTotalTokenCount(usage.totalTokenCount());
         send(m);
       });
 
-      // usage
-      msg.usageMetadata().ifPresent(u -> {
-        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("usage");
-        // 将 usage 信息编码到 text 字段或扩展 DTO；此处把三个数字拼接（可按需改成专门字段）
-        Optional<Integer> promptTokenCount = u.promptTokenCount();
-        Optional<Integer> responseTokenCount = u.responseTokenCount();
-        Optional<Integer> totalTokenCount = u.totalTokenCount();
-        m.setPromptTokenCount(promptTokenCount);
-        m.setResponseTokenCount(responseTokenCount);
-        m.setTotalTokenCount(totalTokenCount);
+      msg.goAway().ifPresent(goAway -> {
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("go_away");
+        Optional<Duration> timeLeft = goAway.timeLeft();
+        m.setTimeLeft(timeLeft.orElse(null));
+        send(m);
+      });
+
+      msg.toolCall().ifPresent(toolCall -> {
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("tool_call");
+        m.setText(toolCall.toString());
+        send(m);
+      });
+
+      msg.toolCallCancellation().ifPresent(cancel -> {
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("tool_call_cancellation");
+        m.setText(cancel.toString());
         send(m);
       });
 
@@ -361,64 +299,195 @@ public class GoogleGeminiRealtimeBridge implements RealtimeModelBridge {
     }
   }
 
-  private void send(WsVoiceAgentResponseMessage msg) {
-    try {
-      String json = JsonUtils.toSkipNullJson(msg);
-      callback.sendText(json);
-    } catch (Exception e) {
-      log.error("serialize message error", e);
-      // fallback minimal message
-//      WsVoiceAgentResponseMessage wsVoiceAgentResponseMessage = new WsVoiceAgentResponseMessage();
-//      wsVoiceAgentResponseMessage.setType(WsVoiceAgentType.ERROR.name());
-//      wsVoiceAgentResponseMessage.setMessage("serialize error");
-      // 手写性能高
-      callback.sendText("{\"type\":\"error\",\"message\":\"serialize error\"}");
-    }
-  }
-
-  private static String safe(String s) {
-    if (s == null) {
-      return "";
-    }
-    return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
-  }
-
-  private void appendTurnTranscript(String role, String text) {
-    if (text == null || text.isEmpty())
+  private void handleServerContent(LiveServerContent sc) {
+    if (sc == null) {
       return;
+    }
+
+    sc.inputTranscription().ifPresent(t -> {
+      String text = t.text().orElse("");
+      if (StrUtil.isNotBlank(text)) {
+        appendUserTranscript(text);
+
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("transcript_in");
+        m.setText(text);
+        send(m);
+      }
+    });
+
+    sc.outputTranscription().ifPresent(t -> {
+      String text = t.text().orElse("");
+      if (StrUtil.isNotBlank(text)) {
+        ensureAssistantTurnStarted();
+
+        appendAssistantTranscript(text);
+
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("transcript_out");
+        m.setText(text);
+        m.setTurnId(currentAssistantTurnId);
+        send(m);
+      }
+    });
+
+    sc.modelTurn().ifPresent(modelTurn -> {
+      List<Part> parts = modelTurn.parts().orElse(List.of());
+      for (Part p : parts) {
+        if (p == null) {
+          continue;
+        }
+
+        p.text().ifPresent(text -> {
+          if (StrUtil.isNotBlank(text)) {
+            ensureAssistantTurnStarted();
+
+            appendAssistantTranscript(text);
+
+            WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("text");
+            m.setText(text);
+            m.setTurnId(currentAssistantTurnId);
+            send(m);
+          }
+        });
+
+        p.inlineData().ifPresent(blob -> {
+          String mt = blob.mimeType().orElse("");
+          byte[] data = blob.data().orElse(null);
+
+          if (data != null && mt.startsWith(OUTPUT_MIME_PREFIX)) {
+            ensureAssistantTurnStarted();
+            callback.sendBinary(data);
+          }
+        });
+      }
+    });
+
+    sc.interrupted().ifPresent(v -> {
+      if (Boolean.TRUE.equals(v)) {
+        String turnId = currentAssistantTurnId;
+        log.info("interrupted:{}", turnId);
+        if (turnId != null) {
+          WsVoiceAgentResponseMessage turnInterrupt = new WsVoiceAgentResponseMessage("assistant_turn_interrupt");
+          turnInterrupt.setTurnId(turnId);
+          send(turnInterrupt);
+        }
+
+        send(new WsVoiceAgentResponseMessage("interrupted"));
+        closeAssistantTurnSilently();
+      }
+    });
+
+    if (sc.turnComplete().orElse(false)) {
+      String turnId = currentAssistantTurnId;
+      if (turnId != null) {
+        WsVoiceAgentResponseMessage turnComplete = new WsVoiceAgentResponseMessage("assistant_turn_complete");
+        turnComplete.setTurnId(turnId);
+        send(turnComplete);
+      }
+
+      send(new WsVoiceAgentResponseMessage("turn_complete"));
+      flushTurnTranscriptOnComplete();
+      closeAssistantTurnSilently();
+    }
+  }
+
+  private String ensureAssistantTurnStarted() {
+    synchronized (assistantTurnLock) {
+      if (assistantTurnOpen && currentAssistantTurnId != null) {
+        return currentAssistantTurnId;
+      }
+
+      currentAssistantTurnId = newAssistantTurnId();
+      assistantTurnOpen = true;
+
+      WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("assistant_turn_start");
+      m.setTurnId(currentAssistantTurnId);
+      send(m);
+
+      return currentAssistantTurnId;
+    }
+  }
+
+  private void closeAssistantTurnSilently() {
+    synchronized (assistantTurnLock) {
+      assistantTurnOpen = false;
+      currentAssistantTurnId = null;
+    }
+  }
+
+  private String newAssistantTurnId() {
+    return "asst_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().replace("-", "");
+  }
+
+  private void appendUserTranscript(String text) {
     synchronized (transcriptLock) {
-      StringBuilder sb = "user".equals(role) ? turnUserTranscript : turnAssistantTranscript;
-      if (sb.length() > 0)
-        sb.append(' ');
-      sb.append(text);
+      if (turnUserTranscript.length() > 0) {
+        turnUserTranscript.append(' ');
+      }
+      turnUserTranscript.append(text);
+    }
+  }
+
+  private void appendAssistantTranscript(String text) {
+    synchronized (transcriptLock) {
+      if (turnAssistantTranscript.length() > 0) {
+        turnAssistantTranscript.append(' ');
+      }
+      turnAssistantTranscript.append(text);
     }
   }
 
   private void flushTurnTranscriptOnComplete() {
-    String userText;
-    String assistantText;
     synchronized (transcriptLock) {
-      userText = turnUserTranscript.toString().trim();
-      assistantText = turnAssistantTranscript.toString().trim();
+      String userText = turnUserTranscript.toString().trim();
+      String assistantText = turnAssistantTranscript.toString().trim();
+
+      if (StrUtil.isNotBlank(userText) || StrUtil.isNotBlank(assistantText)) {
+        WsVoiceAgentResponseMessage m = new WsVoiceAgentResponseMessage("turn_transcript");
+        m.setInputText(userText);
+        m.setOutputText(assistantText);
+        send(m);
+      }
+
       turnUserTranscript.setLength(0);
       turnAssistantTranscript.setLength(0);
     }
+  }
 
-    // 一次 turn complete，分别按角色回调（各一次；如果为空则不回调）
+  private void send(WsVoiceAgentResponseMessage msg) {
     try {
-      if (!userText.isEmpty()) {
-        callback.turnComplete("user", userText);
-      }
-      if (!assistantText.isEmpty()) {
-        callback.turnComplete("assistant", assistantText);
-      }
+      callback.sendText(msg.toJson());
     } catch (Exception e) {
-      log.error("turnComplete callback error", e);
+      log.error("send ws message error: {}", msg, e);
     }
   }
 
+  private String safe(String s) {
+    if (s == null) {
+      return "";
+    }
+    return s.length() > 1000 ? s.substring(0, 1000) : s;
+  }
+
+  /**
+   * 前端说“音频结束”
+   */
   @Override
   public CompletableFuture<Void> endAudioInput() {
-    return this.sendAudioStreamEnd();
+    AsyncSession s = this.session;
+    if (s == null) {
+      return CompletableFuture.completedFuture(null);
+    }
+
+    LiveSendRealtimeInputParameters params = LiveSendRealtimeInputParameters.builder().audioStreamEnd(true).build();
+
+    return s.sendRealtimeInput(params).exceptionally(ex -> {
+      String message = ex.getMessage();
+      log.error("sendAudioStreamEnd error: {}", message, ex);
+      send(new WsVoiceAgentResponseMessage("error", safe(message)));
+      if ("org.java_websocket.exceptions.WebsocketNotConnectedException".equals(message)) {
+        close();
+      }
+      return null;
+    });
   }
 }

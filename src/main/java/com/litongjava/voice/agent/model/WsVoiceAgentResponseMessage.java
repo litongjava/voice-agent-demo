@@ -1,6 +1,9 @@
 package com.litongjava.voice.agent.model;
 
+import java.time.Duration;
 import java.util.Optional;
+
+import com.litongjava.tio.utils.json.JsonUtils;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -15,23 +18,21 @@ import lombok.NoArgsConstructor;
 public class WsVoiceAgentResponseMessage {
 
   private String type;
-
-  // 通用字段
-  private String text;
-  private String message;
-  private String where;
-
   // setup / session
   private String sessionId;
-
-  // goAway
-  private String timeLeft;
-
+  // 通用字段
+  private String text;
+  private String turnId;
+  private String inputText;
+  private String outputText;
   // usage
   private Integer promptTokenCount;
   private Integer responseTokenCount;
   private Integer totalTokenCount;
-
+  // goAway
+  private Duration timeLeft;
+  private String message;
+  private String where;
   // function call
   private String name;
 
@@ -60,4 +61,10 @@ public class WsVoiceAgentResponseMessage {
   public void setTotalTokenCount(Optional<Integer> totalTokenCount) {
     this.totalTokenCount = totalTokenCount != null ? totalTokenCount.orElse(null) : null;
   }
+  
+  public String toJson() {
+    return JsonUtils.toJson(this);
+  }
+  
+  
 }
