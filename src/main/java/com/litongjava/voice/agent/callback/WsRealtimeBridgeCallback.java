@@ -1,9 +1,7 @@
 package com.litongjava.voice.agent.callback;
 
 import java.nio.file.Path;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -25,6 +23,8 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class WsRealtimeBridgeCallback implements RealtimeBridgeCallback {
+
+  private volatile ScheduledFuture<?> proactiveFuture;
 
   private final ChannelContext channelContext;
   private final String sessionId;
@@ -96,15 +96,6 @@ public class WsRealtimeBridgeCallback implements RealtimeBridgeCallback {
 
   private final AtomicBoolean proactiveTaskStarted = new AtomicBoolean(false);
 
-  private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-    @Override
-    public Thread newThread(Runnable r) {
-      Thread t = new Thread(r, "ws-realtime-bridge-callback-" + sessionId);
-      t.setDaemon(true);
-      return t;
-    }
-  });
-
   public WsRealtimeBridgeCallback(ChannelContext channelContext) {
     this.channelContext = channelContext;
     this.sessionId = ChannelContextUtils.key(channelContext);
@@ -167,7 +158,7 @@ public class WsRealtimeBridgeCallback implements RealtimeBridgeCallback {
     closed = true;
 
     try {
-      scheduler.shutdownNow();
+      proactiveFuture.cancel(true);
     } catch (Exception e) {
       log.warn("shutdown scheduler failed: {}", e.getMessage());
     }
@@ -216,7 +207,7 @@ public class WsRealtimeBridgeCallback implements RealtimeBridgeCallback {
       return;
     }
 
-    scheduler.scheduleAtFixedRate(() -> {
+    proactiveFuture = CallbackExecutorService.SHARED_SCHEDULER.scheduleAtFixedRate(() -> {
       try {
         checkAndTriggerProactiveIntervention();
       } catch (Throwable e) {
@@ -259,7 +250,8 @@ public class WsRealtimeBridgeCallback implements RealtimeBridgeCallback {
       return;
     }
 
-    String interventionPrompt = CallbackPromptUtils.buildProactiveInterventionPrompt(lastAssistantText, lastUserText, idleMs);
+    String interventionPrompt = CallbackPromptUtils.buildProactiveInterventionPrompt(lastAssistantText, lastUserText,
+        idleMs);
 
     log.info(
         "trigger proactive intervention, sessionId:{}, idleMs:{}, waitingForUserAnswer:{}, lastAssistantTurnCompleteAt:{}",
