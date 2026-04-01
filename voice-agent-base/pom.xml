@@ -8,6 +8,9 @@
     <version>1.0.0</version>
   </parent>
   <artifactId>voice-agent-base</artifactId>
+  <name>voice-agent-base</name>
+  <description>java-voice-agent</description>
+  <url>https://github.com/litongjava/java-voice-agent</url>
   <properties>
     <!-- 项目属性 -->
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -16,9 +19,8 @@
     <maven.compiler.target>${java.version}</maven.compiler.target>
 
     <!-- 版本属性 -->
-    <lombok-version>1.18.44</lombok-version>
     <fastjson2.version>2.0.52</fastjson2.version>
-    <tio-boot-admin.version>1.1.2</tio-boot-admin.version>
+    <tio-boot-admin.version>2.1.0</tio-boot-admin.version>
 
     <!-- 应用程序属性 -->
     <final.name>web-hello</final.name>
@@ -52,7 +54,7 @@
     <!-- Tio Boot 框架 -->
     <dependency>
       <groupId>com.litongjava</groupId>
-      <artifactId>tio-boot-admin</artifactId>
+      <artifactId>tio-boot-admin-web</artifactId>
       <version>${tio-boot-admin.version}</version>
     </dependency>
 
@@ -61,13 +63,6 @@
       <artifactId>java-native-media</artifactId>
       <version>1.0.1</version>
     </dependency>
-
-    <dependency>
-      <groupId>com.litongjava</groupId>
-      <artifactId>elevenlabs-java-sdk</artifactId>
-      <version>1.0.0</version>
-    </dependency>
-
 
     <dependency>
       <groupId>com.google.genai</groupId>

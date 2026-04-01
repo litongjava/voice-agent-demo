@@ -2,7 +2,6 @@ package com.litongjava.voice.agent.bridge;
 
 import com.litongjava.consts.ModelPlatformName;
 import com.litongjava.tio.utils.environment.EnvUtils;
-import com.litongjava.voice.agent.bridge.elevenlabs.ElevenLabsRealtimeModelBridge;
 
 public class RealtimeModelBridgeFactory {
 
@@ -18,8 +17,7 @@ public class RealtimeModelBridgeFactory {
       bridge = new QwenOmniRealtimeBridge(callback);
 
     } else if (ModelPlatformName.ELEVEN_LABS.equals(platform)) {
-      bridge= new ElevenLabsRealtimeModelBridge(callback);
-      
+
     } else {
       bridge = new QwenOmniRealtimeBridge(callback);
     }
